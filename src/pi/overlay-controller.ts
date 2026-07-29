@@ -1,10 +1,12 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
+import { ToolboxConfigStore } from "../config.ts";
 import type { ToolboxView } from "../domain.ts";
 import { ToolboxOverlay } from "../ui/overlay.ts";
-import { createFoundationScreens } from "../ui/screens.ts";
+import { createToolboxScreens } from "../ui/screens.ts";
 
 export class ToolboxOverlayController {
 	private activeOverlay: ToolboxOverlay | null = null;
+	private readonly configStore = new ToolboxConfigStore();
 
 	async open(ctx: ExtensionContext, view: ToolboxView): Promise<void> {
 		if (ctx.mode !== "tui") {
@@ -16,10 +18,18 @@ export class ToolboxOverlayController {
 			return;
 		}
 
+		let config;
+		try {
+			config = await this.configStore.load();
+		} catch (error) {
+			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			return;
+		}
+
 		try {
 			await ctx.ui.custom<void>(
 				(tui, theme, _keybindings, done) => {
-					const screens = createFoundationScreens(theme);
+					const screens = createToolboxScreens({ ctx, tui, theme, config, configStore: this.configStore });
 					const overlay = new ToolboxOverlay(view, tui, theme, screens, () => done());
 					this.activeOverlay = overlay;
 					return overlay;
