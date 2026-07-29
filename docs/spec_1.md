@@ -316,7 +316,7 @@ Default profiles:
 
 | Workflow | Model | Thinking |
 |---|---|---|
-| Prompt Polish | `openai/gpt-5.6-luna` | `high` |
+| Prompt Polish | `openai-codex/gpt-5.6-luna` | `high` |
 | Feature Spec | Current Pi model, captured and persisted on first use | `high` |
 | Implementation | Current Pi model, captured and persisted on first use | `high` |
 
