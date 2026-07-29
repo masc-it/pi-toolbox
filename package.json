@@ -18,6 +18,11 @@
   "scripts": {
     "typecheck": "tsc --noEmit"
   },
+  "pi": {
+    "extensions": [
+      "./src/index.ts"
+    ]
+  },
   "peerDependencies": {
     "@earendil-works/pi-ai": "*",
     "@earendil-works/pi-coding-agent": "*",
