@@ -32,10 +32,14 @@
     "@earendil-works/pi-ai": "0.82.1",
     "@earendil-works/pi-coding-agent": "0.82.1",
     "@earendil-works/pi-tui": "0.82.1",
+    "@types/better-sqlite3": "^7.6.13",
     "@types/node": "^24.0.0",
     "typescript": "^5.9.0"
   },
   "engines": {
     "node": ">=20"
+  },
+  "dependencies": {
+    "better-sqlite3": "^12.11.1"
   }
 }
