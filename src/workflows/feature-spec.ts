@@ -106,6 +106,10 @@ export class FeatureSpecWorkflow {
 		await this.repository.updateModelProfile(featureSpecId, profile);
 	}
 
+	async getDetail(featureSpecId: string): Promise<FeatureSpecDetail> {
+		return this.requireDetail(featureSpecId);
+	}
+
 	async editReview(featureSpecId: string, value: unknown): Promise<SpecRevision> {
 		const document = parseSpecDocumentValue(value);
 		return this.repository.saveReview({ featureSpecId, document });

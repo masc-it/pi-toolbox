@@ -29,14 +29,26 @@ const ITEMS: readonly LandingItem[] = [
 
 export class LandingScreen implements ToolboxScreen {
 	private selectedIndex = 0;
+	private projectLabel = "resolving…";
 
 	constructor(
 		private readonly host: ToolboxScreenHost,
 		private readonly theme: Theme,
-	) {}
+		resolveProjectLabel: () => Promise<string>,
+	) {
+		void resolveProjectLabel()
+			.then((label) => {
+				this.projectLabel = label;
+				this.host.requestRender();
+			})
+			.catch(() => {
+				this.projectLabel = "unavailable";
+				this.host.requestRender();
+			});
+	}
 
 	render(width: number): string[] {
-		const lines = [this.theme.fg("muted", "Workflow tools")];
+		const lines = [this.theme.fg("muted", `Project: ${this.projectLabel}`)];
 		lines.push("");
 
 		for (const [index, item] of ITEMS.entries()) {

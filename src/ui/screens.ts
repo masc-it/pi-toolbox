@@ -1,10 +1,11 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import type { ToolboxConfigStore } from "../config.ts";
-import { DEFAULT_PROMPT_POLISH_PROFILE, type ToolboxConfig } from "../domain.ts";
+import { DEFAULT_PROMPT_POLISH_PROFILE, type ToolboxConfig, type WorkflowModelProfile } from "../domain.ts";
 import { WorkflowModelClient } from "../model/client.ts";
+import type { ToolboxRuntime } from "../runtime.ts";
 import { PromptPolishWorkflow } from "../workflows/polish.ts";
+import { FeatureSpecScreen } from "./feature-spec.ts";
 import { LandingScreen, UnavailableWorkflowScreen } from "./landing.ts";
 import { PromptPolishScreen } from "./polish.ts";
 import type { ToolboxScreenFactories } from "./screen.ts";
@@ -14,17 +15,18 @@ interface ToolboxScreenDependencies {
 	tui: TUI;
 	theme: Theme;
 	config: ToolboxConfig;
-	configStore: ToolboxConfigStore;
+	runtime: ToolboxRuntime;
 }
 
 export function createToolboxScreens(dependencies: ToolboxScreenDependencies): ToolboxScreenFactories {
-	const { ctx, tui, theme, config, configStore } = dependencies;
+	const { ctx, tui, theme, config, runtime } = dependencies;
 	const workflow = new PromptPolishWorkflow(new WorkflowModelClient(ctx.modelRegistry));
 	const models = availableModels(ctx);
 	let configuredProfile = config.models.prompt_polish ?? DEFAULT_PROMPT_POLISH_PROFILE;
 
 	return {
-		landing: (host) => new LandingScreen(host, theme),
+		landing: (host) =>
+			new LandingScreen(host, theme, async () => (await runtime.resolveProject(ctx.cwd)).repositoryLabel),
 		polish: (host) =>
 			new PromptPolishScreen({
 				host,
@@ -36,11 +38,22 @@ export function createToolboxScreens(dependencies: ToolboxScreenDependencies): T
 				workflow,
 				onAccept: (text) => ctx.ui.setEditorText(text),
 				onSaveDefault: async (profile) => {
-					await configStore.saveModelProfile("prompt_polish", profile);
+					await runtime.config.saveModelProfile("prompt_polish", profile);
 					configuredProfile = profile;
 				},
 			}),
-		"feature-spec-list": (host) => new UnavailableWorkflowScreen("Feature Spec", host, theme),
+		"feature-spec-list": (host) =>
+			new FeatureSpecScreen({
+				host,
+				tui,
+				theme,
+				models,
+				defaultProfile: featureSpecProfile(config, ctx),
+				configStore: runtime.config,
+				repository: runtime.featureSpecRepository(),
+				workflow: runtime.createFeatureSpecWorkflow(ctx.modelRegistry),
+				resolveProject: () => runtime.resolveProject(ctx.cwd),
+			}),
 		"implementation-list": (host) => new UnavailableWorkflowScreen("Implementation", host, theme),
 	};
 }
@@ -51,6 +64,17 @@ function availableModels(ctx: ExtensionContext): Model<Api>[] {
 		models.push(ctx.model);
 	}
 	return models;
+}
+
+function featureSpecProfile(config: ToolboxConfig, ctx: ExtensionContext): WorkflowModelProfile {
+	const configured = config.models.feature_spec;
+	if (configured) {
+		return configured;
+	}
+	if (!ctx.model) {
+		return DEFAULT_PROMPT_POLISH_PROFILE;
+	}
+	return { provider: ctx.model.provider, model: ctx.model.id, thinkingLevel: "high" };
 }
 
 function sameModel(left: Model<Api>, right: Model<Api>): boolean {
