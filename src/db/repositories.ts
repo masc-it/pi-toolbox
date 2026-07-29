@@ -37,6 +37,7 @@ export interface SaveReviewInput {
 
 export interface FeatureSpecRepository {
 	createDraft(input: CreateDraftInput): Promise<FeatureSpec>;
+	updateModelProfile(featureSpecId: string, profile: WorkflowModelProfile): Promise<void>;
 	saveQuestion(input: SaveQuestionInput): Promise<SpecQuestion>;
 	saveAnswer(questionId: string, answer: string): Promise<void>;
 	saveReview(input: SaveReviewInput): Promise<SpecRevision>;
@@ -174,6 +175,22 @@ export class SqliteFeatureSpecRepository implements FeatureSpecRepository {
 			);
 		this.recordEvent(feature.projectId, feature.id, "feature_draft_created", { title });
 		return feature;
+	}
+
+	async updateModelProfile(featureSpecId: string, profile: WorkflowModelProfile): Promise<void> {
+		const feature = this.requireFeature(featureSpecId);
+		if (feature.stage === "approved") {
+			throw new Error("The model profile of an approved specification is immutable");
+		}
+		const now = new Date().toISOString();
+		this.database
+			.prepare(
+				`UPDATE feature_specs
+				 SET model_provider = ?, model_id = ?, thinking_level = ?, updated_at = ?
+				 WHERE id = ? AND stage <> 'approved'`,
+			)
+			.run(profile.provider, profile.model, profile.thinkingLevel, now, featureSpecId);
+		this.recordEvent(feature.projectId, feature.id, "spec_model_profile_changed", profile);
 	}
 
 	async saveQuestion(input: SaveQuestionInput): Promise<SpecQuestion> {
