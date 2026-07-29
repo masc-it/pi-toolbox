@@ -4,7 +4,7 @@ import { Editor, type EditorTheme, Key, matchesKey, wrapTextWithAnsi, type TUI }
 import type { ToolboxConfigStore } from "../config.ts";
 import type { FeatureSpec, FeatureSpecDetail, ProjectContext, SpecRevision, WorkflowModelProfile } from "../domain.ts";
 import type { FeatureSpecRepository } from "../db/repositories.ts";
-import { formatModelProfile } from "../model/client.ts";
+import { formatModelProfile, supportsThinkingLevel } from "../model/client.ts";
 import type { FeatureSpecProgress, FeatureSpecWorkflow } from "../workflows/feature-spec.ts";
 import { ModelPicker } from "./model-picker.ts";
 import type { ToolboxScreen, ToolboxScreenHost } from "./screen.ts";
@@ -317,6 +317,10 @@ export class FeatureSpecScreen implements ToolboxScreen {
 		}
 		if (matchesKey(data, Key.enter)) {
 			if (this.selectedIndex === 0) {
+				if (!this.profileIsAvailable(this.selectedProfile)) {
+					this.openModelPicker(null);
+					return;
+				}
 				this.editor.setText("");
 				this.editorError = "";
 				this.mode = "creating";
@@ -683,7 +687,12 @@ export class FeatureSpecScreen implements ToolboxScreen {
 	}
 
 	private profileIsAvailable(profile: WorkflowModelProfile): boolean {
-		return this.options.models.some((model) => model.provider === profile.provider && model.id === profile.model);
+		return this.options.models.some(
+			(model) =>
+				model.provider === profile.provider &&
+				model.id === profile.model &&
+				supportsThinkingLevel(model, profile.thinkingLevel),
+		);
 	}
 
 	private requireProject(): ProjectContext {

@@ -2,7 +2,7 @@ import type { Api, Model } from "@earendil-works/pi-ai";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Editor, type EditorTheme, Key, matchesKey, wrapTextWithAnsi, type TUI } from "@earendil-works/pi-tui";
 import type { WorkflowModelProfile } from "../domain.ts";
-import { formatModelProfile } from "../model/client.ts";
+import { formatModelProfile, supportsThinkingLevel } from "../model/client.ts";
 import type { PromptPolishWorkflow } from "../workflows/polish.ts";
 import { ModelPicker } from "./model-picker.ts";
 import type { ToolboxScreen, ToolboxScreenHost } from "./screen.ts";
@@ -39,7 +39,10 @@ export class PromptPolishScreen implements ToolboxScreen {
 		this.editor.onSubmit = (value) => this.finishEditing(value);
 
 		const profileAvailable = options.models.some(
-			(model) => model.provider === this.profile.provider && model.id === this.profile.model,
+			(model) =>
+				model.provider === this.profile.provider &&
+				model.id === this.profile.model &&
+				supportsThinkingLevel(model, this.profile.thinkingLevel),
 		);
 		if (!profileAvailable) {
 			this.openModelPicker("ready");

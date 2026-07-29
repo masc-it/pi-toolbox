@@ -2,7 +2,7 @@
 
 Minimal, keyboard-first workflow tools for the Pi coding agent.
 
-Pi Toolbox is implementing its first release in three user-QA stages. The current stage provides the shared overlay and Prompt Polish. Feature Spec and Implementation remain visible in the navigation and unlock after their development checkpoints.
+Pi Toolbox provides a shared keyboard-driven overlay with Prompt Polish, persistent Feature Specs, and an Implementation candidate browser. Agent orchestration unlocks after the Feature Spec persistence QA checkpoint.
 
 ## Install from a checkout
 
@@ -12,21 +12,33 @@ pi install /absolute/path/to/pi-toolbox
 
 Restart Pi after installation.
 
+## Entry points
+
+- `Ctrl+Shift+Enter` or `/toolbox`: open the Toolbox landing screen.
+- `Ctrl+Enter` or `/tb-polish`: open Prompt Polish directly.
+- `/tb-spec`: open Feature Spec directly.
+- `/tb-implement`: open Implementation directly.
+
+Slash commands support terminals that do not emit distinct modified Enter sequences.
+
 ## Prompt Polish
 
-1. Write a prompt in Pi's editor.
-2. Press `Ctrl+Enter`, or open the Toolbox with `Ctrl+Shift+Enter` and select **Prompt Polish**.
-3. Keep or change the model and thinking effort.
-4. Generate the polished prompt, then accept, edit, retry, or cancel it.
+Write a prompt in Pi's editor, open Prompt Polish, and select a model and thinking effort. Generate the polished prompt, then accept, edit, retry, or cancel it. The editor changes only after acceptance.
 
-Slash-command fallbacks are available when a terminal does not distinguish modified Enter sequences:
+## Feature Spec
 
-- `/toolbox`
-- `/tb-polish`
-- `/tb-spec`
-- `/tb-implement`
+Feature Spec requires Pi to run inside a Git repository with an `origin` remote. It identifies the project from the canonical remote and stores drafts, interview answers, reviewed revisions, tasks, and user QA checkpoints in the global Toolbox database.
 
-Workflow model defaults are stored in the Pi agent directory at `pi-toolbox/config.json`.
+Create a draft from a feature description, answer one requirements question at a time, review or refine the generated specification, and approve it when its scope and tasks are correct. Approved features appear in Implementation as `todo`.
+
+## Data
+
+Pi Toolbox stores configuration and workflow state under the Pi agent directory:
+
+- `pi-toolbox/config.json`
+- `pi-toolbox/toolbox.sqlite`
+
+The SQLite database remains outside project repositories and scopes every feature to its canonical Git identity.
 
 ## Development
 
