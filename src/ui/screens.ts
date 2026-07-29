@@ -6,7 +6,8 @@ import { WorkflowModelClient } from "../model/client.ts";
 import type { ToolboxRuntime } from "../runtime.ts";
 import { PromptPolishWorkflow } from "../workflows/polish.ts";
 import { FeatureSpecScreen } from "./feature-spec.ts";
-import { LandingScreen, UnavailableWorkflowScreen } from "./landing.ts";
+import { ImplementationScreen } from "./implementation.ts";
+import { LandingScreen } from "./landing.ts";
 import { PromptPolishScreen } from "./polish.ts";
 import type { ToolboxScreenFactories } from "./screen.ts";
 
@@ -54,7 +55,16 @@ export function createToolboxScreens(dependencies: ToolboxScreenDependencies): T
 				workflow: runtime.createFeatureSpecWorkflow(ctx.modelRegistry),
 				resolveProject: () => runtime.resolveProject(ctx.cwd),
 			}),
-		"implementation-list": (host) => new UnavailableWorkflowScreen("Implementation", host, theme),
+		"implementation-list": (host) =>
+			new ImplementationScreen({
+				host,
+				theme,
+				models,
+				defaultProfile: implementationProfile(config, ctx),
+				configStore: runtime.config,
+				repository: runtime.implementationRepository(),
+				resolveProject: () => runtime.resolveProject(ctx.cwd),
+			}),
 	};
 }
 
@@ -68,6 +78,17 @@ function availableModels(ctx: ExtensionContext): Model<Api>[] {
 
 function featureSpecProfile(config: ToolboxConfig, ctx: ExtensionContext): WorkflowModelProfile {
 	const configured = config.models.feature_spec;
+	if (configured) {
+		return configured;
+	}
+	if (!ctx.model) {
+		return DEFAULT_PROMPT_POLISH_PROFILE;
+	}
+	return { provider: ctx.model.provider, model: ctx.model.id, thinkingLevel: "high" };
+}
+
+function implementationProfile(config: ToolboxConfig, ctx: ExtensionContext): WorkflowModelProfile {
+	const configured = config.models.implementation;
 	if (configured) {
 		return configured;
 	}

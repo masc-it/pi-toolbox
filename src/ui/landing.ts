@@ -92,32 +92,3 @@ export class LandingScreen implements ToolboxScreen {
 
 	invalidate(): void {}
 }
-
-export class UnavailableWorkflowScreen implements ToolboxScreen {
-	constructor(
-		private readonly workflowName: string,
-		private readonly host: ToolboxScreenHost,
-		private readonly theme: Theme,
-	) {}
-
-	render(width: number): string[] {
-		return [
-			this.theme.fg("accent", this.theme.bold(this.workflowName)),
-			"",
-			...wrapTextWithAnsi(
-				this.theme.fg("muted", "This workflow unlocks after the current development QA checkpoint."),
-				width,
-			),
-			"",
-			this.theme.fg("dim", "Esc back"),
-		];
-	}
-
-	handleInput(data: string): void {
-		if (matchesKey(data, Key.escape)) {
-			this.host.back();
-		}
-	}
-
-	invalidate(): void {}
-}
