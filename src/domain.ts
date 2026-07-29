@@ -57,6 +57,7 @@ export interface SpecQuestion {
 	id: string;
 	featureSpecId: string;
 	sequence: number;
+	estimatedQuestionCount: number;
 	prompt: string;
 	choices: string[];
 	answer?: string;

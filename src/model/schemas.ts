@@ -5,6 +5,7 @@ export interface InterviewDecision {
 	question?: {
 		prompt: string;
 		choices: string[];
+		estimatedQuestionCount: number;
 	};
 }
 
@@ -21,7 +22,14 @@ export function parseInterviewDecision(text: string): InterviewDecision {
 	}
 	const prompt = requireString(value.question.prompt, "question.prompt");
 	const choices = requireStringArray(value.question.choices, "question.choices", true);
-	return { readyForReview: false, question: { prompt, choices } };
+	const estimatedQuestionCount = value.question.estimatedQuestionCount;
+	if (!Number.isInteger(estimatedQuestionCount) || (estimatedQuestionCount as number) < 1 || (estimatedQuestionCount as number) > 10) {
+		throw new Error("question.estimatedQuestionCount must be an integer between 1 and 10");
+	}
+	return {
+		readyForReview: false,
+		question: { prompt, choices, estimatedQuestionCount: estimatedQuestionCount as number },
+	};
 }
 
 export function parseSpecDocument(text: string): SpecDocument {

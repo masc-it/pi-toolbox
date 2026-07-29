@@ -23,6 +23,8 @@ export type FeatureSpecProgress =
 	| { kind: "question"; detail: FeatureSpecDetail; question: SpecQuestion }
 	| { kind: "review"; detail: FeatureSpecDetail; revision: SpecRevision };
 
+export type FeatureSpecGenerationStage = "evaluating_requirements" | "producing_plan";
+
 export class FeatureSpecWorkflow {
 	constructor(
 		private readonly repository: FeatureSpecRepository,
@@ -47,7 +49,12 @@ export class FeatureSpecWorkflow {
 		});
 	}
 
-	async resume(featureSpecId: string, checkoutRoot: string, signal: AbortSignal): Promise<FeatureSpecProgress> {
+	async resume(
+		featureSpecId: string,
+		checkoutRoot: string,
+		signal: AbortSignal,
+		onGenerationStage?: (stage: FeatureSpecGenerationStage) => void,
+	): Promise<FeatureSpecProgress> {
 		const detail = await this.requireDetail(featureSpecId);
 		if (detail.feature.stage === "approved") {
 			throw new Error("Approved specifications are reference-only in Feature Spec");
@@ -61,9 +68,10 @@ export class FeatureSpecWorkflow {
 			return { kind: "question", detail, question: unanswered };
 		}
 		if (detail.questions.length >= 10) {
-			return this.generateReview(detail, checkoutRoot, signal);
+			return this.generateReview(detail, checkoutRoot, signal, onGenerationStage);
 		}
 
+		onGenerationStage?.("evaluating_requirements");
 		const repositoryContext = await this.inspectRepository(checkoutRoot);
 		const response = await this.modelClient.completeText({
 			profile: detail.feature.modelProfile,
@@ -76,16 +84,18 @@ export class FeatureSpecWorkflow {
 			if (detail.questions.length === 0) {
 				throw new Error("The requirements interview must ask at least one question");
 			}
-			return this.generateReview(detail, checkoutRoot, signal, repositoryContext);
+			return this.generateReview(detail, checkoutRoot, signal, onGenerationStage, repositoryContext);
 		}
 		if (!decision.question) {
 			throw new Error("The interview model did not provide a question");
 		}
 
+		const sequence = detail.questions.length + 1;
 		const question = await this.repository.saveQuestion({
 			featureSpecId,
 			prompt: decision.question.prompt,
 			choices: decision.question.choices,
+			estimatedQuestionCount: Math.max(sequence, decision.question.estimatedQuestionCount),
 		});
 		const updated = await this.requireDetail(featureSpecId);
 		return { kind: "question", detail: updated, question };
@@ -97,9 +107,10 @@ export class FeatureSpecWorkflow {
 		answer: string;
 		checkoutRoot: string;
 		signal: AbortSignal;
+		onGenerationStage?: (stage: FeatureSpecGenerationStage) => void;
 	}): Promise<FeatureSpecProgress> {
 		await this.repository.saveAnswer(input.questionId, input.answer);
-		return this.resume(input.featureSpecId, input.checkoutRoot, input.signal);
+		return this.resume(input.featureSpecId, input.checkoutRoot, input.signal, input.onGenerationStage);
 	}
 
 	async replaceModelProfile(featureSpecId: string, profile: WorkflowModelProfile): Promise<void> {
@@ -147,8 +158,10 @@ export class FeatureSpecWorkflow {
 		detail: FeatureSpecDetail,
 		checkoutRoot: string,
 		signal: AbortSignal,
+		onGenerationStage?: (stage: FeatureSpecGenerationStage) => void,
 		repositoryContext?: string,
 	): Promise<FeatureSpecProgress> {
+		onGenerationStage?.("producing_plan");
 		const context = repositoryContext ?? (await this.inspectRepository(checkoutRoot));
 		const response = await this.modelClient.completeText({
 			profile: detail.feature.modelProfile,

@@ -501,11 +501,11 @@ The interview asks one to ten questions, one at a time:
 
 Questions focus on behavior, scope, trade-offs, compatibility, UX, failures, and acceptance expectations. The workflow inspects repository facts and never asks the user to provide discoverable information.
 
-The interview is resumable after cancellation or restart.
+The interview is resumable after cancellation or restart. Each question displays its sequence and the model's current total estimate, such as `Question 3/7 estimated`; the estimate adjusts as answers resolve or introduce material ambiguity.
 
 ### 10.3 Review and approval
 
-The generated revision contains the fields defined in Section 4.4 and structured tasks from Section 4.5.
+The generated revision contains the fields defined in Section 4.4 and structured tasks from Section 4.5. During generation, the overlay displays `Producing the implementation plan… This can take a while.` until the review is ready.
 
 The review screen provides `Edit`, `Request Refinement`, `Approve`, and `Close in Review` actions. Approval atomically:
 

@@ -28,6 +28,7 @@ export interface SaveQuestionInput {
 	featureSpecId: string;
 	prompt: string;
 	choices: string[];
+	estimatedQuestionCount: number;
 }
 
 export interface SaveReviewInput {
@@ -205,25 +206,36 @@ export class SqliteFeatureSpecRepository implements FeatureSpecRepository {
 			if (count.count >= 10) {
 				throw new Error("The requirements interview has reached ten questions");
 			}
+			const sequence = count.count + 1;
+			if (
+				!Number.isInteger(input.estimatedQuestionCount) ||
+				input.estimatedQuestionCount < sequence ||
+				input.estimatedQuestionCount > 10
+			) {
+				throw new Error(`Question ${sequence} requires a total estimate between ${sequence} and 10`);
+			}
 
 			const now = new Date().toISOString();
 			const question: SpecQuestion = {
 				id: randomUUID(),
 				featureSpecId: feature.id,
-				sequence: count.count + 1,
+				sequence,
+				estimatedQuestionCount: input.estimatedQuestionCount,
 				prompt: input.prompt.trim(),
 				choices: input.choices,
 				createdAt: now,
 			};
 			this.database
 				.prepare(
-					`INSERT INTO spec_questions (id, feature_spec_id, sequence, prompt, choices_json, created_at)
-					 VALUES (?, ?, ?, ?, ?, ?)`,
+					`INSERT INTO spec_questions (
+						id, feature_spec_id, sequence, estimated_question_count, prompt, choices_json, created_at
+					) VALUES (?, ?, ?, ?, ?, ?, ?)`,
 				)
 				.run(
 					question.id,
 					question.featureSpecId,
 					question.sequence,
+					question.estimatedQuestionCount,
 					question.prompt,
 					JSON.stringify(question.choices),
 					now,
@@ -489,6 +501,7 @@ interface SpecQuestionRow {
 	id: string;
 	feature_spec_id: string;
 	sequence: number;
+	estimated_question_count: number | null;
 	prompt: string;
 	choices_json: string;
 	answer: string | null;
@@ -553,6 +566,7 @@ function mapQuestion(row: SpecQuestionRow): SpecQuestion {
 		id: row.id,
 		featureSpecId: row.feature_spec_id,
 		sequence: row.sequence,
+		estimatedQuestionCount: row.estimated_question_count ?? 10,
 		prompt: row.prompt,
 		choices: JSON.parse(row.choices_json) as string[],
 		...(row.answer ? { answer: row.answer } : {}),

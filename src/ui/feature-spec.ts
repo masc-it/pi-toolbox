@@ -5,7 +5,11 @@ import type { ToolboxConfigStore } from "../config.ts";
 import type { FeatureSpec, FeatureSpecDetail, ProjectContext, SpecRevision, WorkflowModelProfile } from "../domain.ts";
 import type { FeatureSpecRepository } from "../db/repositories.ts";
 import { formatModelProfile, supportsThinkingLevel } from "../model/client.ts";
-import type { FeatureSpecProgress, FeatureSpecWorkflow } from "../workflows/feature-spec.ts";
+import type {
+	FeatureSpecGenerationStage,
+	FeatureSpecProgress,
+	FeatureSpecWorkflow,
+} from "../workflows/feature-spec.ts";
 import { ModelPicker } from "./model-picker.ts";
 import type { ToolboxScreen, ToolboxScreenHost } from "./screen.ts";
 import { formatSpecDocument } from "./spec-document.ts";
@@ -214,7 +218,11 @@ export class FeatureSpecScreen implements ToolboxScreen {
 			this.renderProject(),
 			this.renderProfile(detail.feature.modelProfile),
 			"",
-			this.options.theme.fg("muted", `${detail.feature.title} · Question ${question.sequence}/10`),
+			this.options.theme.fg(
+				"accent",
+				this.options.theme.bold(`Question ${question.sequence}/${question.estimatedQuestionCount} estimated`),
+			),
+			this.options.theme.fg("muted", `${detail.feature.title} · estimate adjusts as requirements become clearer`),
 			"",
 			...wrapTextWithAnsi(this.options.theme.fg("text", question.prompt), width),
 			"",
@@ -469,7 +477,14 @@ export class FeatureSpecScreen implements ToolboxScreen {
 				this.showReview(detail, detail.review);
 				return;
 			}
-			this.applyProgress(await this.options.workflow.resume(feature.id, this.requireProject().checkout.root, signal));
+			this.applyProgress(
+				await this.options.workflow.resume(
+					feature.id,
+					this.requireProject().checkout.root,
+					signal,
+					(stage) => this.showGenerationStage(stage),
+				),
+			);
 		});
 	}
 
@@ -486,7 +501,12 @@ export class FeatureSpecScreen implements ToolboxScreen {
 				profile: this.selectedProfile,
 			});
 			this.applyProgress(
-				await this.options.workflow.resume(feature.id, this.requireProject().checkout.root, signal),
+				await this.options.workflow.resume(
+					feature.id,
+					this.requireProject().checkout.root,
+					signal,
+					(stage) => this.showGenerationStage(stage),
+				),
 			);
 		});
 	}
@@ -510,6 +530,7 @@ export class FeatureSpecScreen implements ToolboxScreen {
 					answer,
 					checkoutRoot: this.requireProject().checkout.root,
 					signal,
+					onGenerationStage: (stage) => this.showGenerationStage(stage),
 				}),
 			);
 		});
@@ -674,6 +695,14 @@ export class FeatureSpecScreen implements ToolboxScreen {
 					this.request = null;
 				}
 			});
+	}
+
+	private showGenerationStage(stage: FeatureSpecGenerationStage): void {
+		this.workingMessage =
+			stage === "producing_plan"
+				? "Producing the implementation plan… This can take a while."
+				: "Evaluating your answers and preparing the next question…";
+		this.options.host.requestRender();
 	}
 
 	private cancelOperation(): void {

@@ -166,6 +166,14 @@ BEGIN
 END;
 `,
 	},
+	{
+		version: 2,
+		name: "interview_question_estimate",
+		up: `
+ALTER TABLE spec_questions
+ADD COLUMN estimated_question_count INTEGER CHECK (estimated_question_count BETWEEN 1 AND 10);
+`,
+	},
 ];
 
 export function applyMigrations(database: Database.Database): void {
