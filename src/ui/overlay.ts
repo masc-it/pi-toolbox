@@ -1,5 +1,5 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import type { Component, TUI } from "@earendil-works/pi-tui";
+import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ToolboxView } from "../domain.ts";
 import { OverlayNavigation } from "./navigation.ts";
@@ -7,10 +7,20 @@ import type { ToolboxScreen, ToolboxScreenFactories, ToolboxScreenHost } from ".
 
 const MINIMUM_RENDER_WIDTH = 20;
 
-export class ToolboxOverlay implements Component, ToolboxScreenHost {
+export class ToolboxOverlay implements Component, Focusable, ToolboxScreenHost {
 	private readonly navigation: OverlayNavigation;
 	private screen: ToolboxScreen;
 	private closed = false;
+	private _focused = false;
+
+	get focused(): boolean {
+		return this._focused;
+	}
+
+	set focused(value: boolean) {
+		this._focused = value;
+		this.screen.setFocused?.(value);
+	}
 
 	constructor(
 		initialView: ToolboxView,
@@ -55,7 +65,11 @@ export class ToolboxOverlay implements Component, ToolboxScreenHost {
 		const content = this.screen.render(contentWidth);
 		const top = this.renderTopBorder(renderWidth);
 		const bottom = this.theme.fg("border", `╰${"─".repeat(renderWidth - 2)}╯`);
-		const body = content.map((line) => this.renderContentLine(line, contentWidth));
+		const bodyHeight = Math.max(0, this.tui.terminal.rows - 2);
+		const body = content.slice(0, bodyHeight).map((line) => this.renderContentLine(line, contentWidth));
+		while (body.length < bodyHeight) {
+			body.push(this.renderContentLine("", contentWidth));
+		}
 		return [top, ...body, bottom];
 	}
 
@@ -66,6 +80,10 @@ export class ToolboxOverlay implements Component, ToolboxScreenHost {
 		}
 		if (matchesKey(data, Key.ctrl("enter")) && this.navigation.current !== "polish") {
 			this.open("polish");
+			return;
+		}
+		if (matchesKey(data, Key.ctrl(".")) && this.navigation.current !== "context-finder") {
+			this.open("context-finder");
 			return;
 		}
 		this.screen.handleInput(data);
@@ -82,6 +100,7 @@ export class ToolboxOverlay implements Component, ToolboxScreenHost {
 	private replaceScreen(): void {
 		this.screen.dispose?.();
 		this.screen = this.createCurrentScreen();
+		this.screen.setFocused?.(this._focused);
 		this.requestRender();
 	}
 

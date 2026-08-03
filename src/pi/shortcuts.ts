@@ -16,4 +16,11 @@ export function registerToolboxShortcuts(pi: ExtensionAPI, controller: ToolboxOv
 			await controller.open(ctx, "polish");
 		},
 	});
+
+	pi.registerShortcut(Key.ctrl("."), {
+		description: "Open Context Finder",
+		handler: async (ctx) => {
+			await controller.open(ctx, "context-finder");
+		},
+	});
 }

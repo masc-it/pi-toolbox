@@ -49,7 +49,11 @@ export class WorkflowModelClient {
 			throw new DOMException("Model request cancelled", "AbortError");
 		}
 		if (response.stopReason !== "stop") {
-			throw new Error(`Model request stopped with reason: ${response.stopReason}`);
+			throw new Error(
+				response.stopReason === "error"
+					? response.errorMessage ?? "Model request failed"
+					: `Model request stopped with reason: ${response.stopReason}`,
+			);
 		}
 
 		const text = response.content

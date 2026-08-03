@@ -49,8 +49,6 @@ export function createDefaultConfig(): ToolboxConfig {
 	return {
 		models: {
 			prompt_polish: { ...DEFAULT_PROMPT_POLISH_PROFILE },
-			feature_spec: null,
-			implementation: null,
 		},
 	};
 }
@@ -63,8 +61,6 @@ function parseConfig(value: unknown): ToolboxConfig {
 	return {
 		models: {
 			prompt_polish: parseOptionalProfile(value.models.prompt_polish) ?? { ...DEFAULT_PROMPT_POLISH_PROFILE },
-			feature_spec: parseOptionalProfile(value.models.feature_spec),
-			implementation: parseOptionalProfile(value.models.implementation),
 		},
 	};
 }

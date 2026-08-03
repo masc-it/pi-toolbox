@@ -11,8 +11,7 @@ interface ToolboxCommand {
 const COMMANDS: readonly ToolboxCommand[] = [
 	{ name: "toolbox", description: "Open Pi Toolbox", view: "landing" },
 	{ name: "tb-polish", description: "Open Prompt Polish", view: "polish" },
-	{ name: "tb-spec", description: "Open Feature Spec", view: "feature-spec-list" },
-	{ name: "tb-implement", description: "Open Implementation", view: "implementation-list" },
+	{ name: "tb-context", description: "Open Context Finder", view: "context-finder" },
 ];
 
 export function registerToolboxCommands(pi: ExtensionAPI, controller: ToolboxOverlayController): void {

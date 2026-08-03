@@ -16,36 +16,19 @@ const ITEMS: readonly LandingItem[] = [
 		view: "polish",
 	},
 	{
-		label: "Feature Spec",
-		description: "Clarify a feature and create an approved implementation specification.",
-		view: "feature-spec-list",
-	},
-	{
-		label: "Implementation",
-		description: "Start or resume implementation from an approved specification.",
-		view: "implementation-list",
+		label: "Context Finder",
+		description: "Find relevant project files and symbols, then append them to the current prompt.",
+		view: "context-finder",
 	},
 ];
 
 export class LandingScreen implements ToolboxScreen {
 	private selectedIndex = 0;
-	private projectLabel = "resolving…";
-
 	constructor(
 		private readonly host: ToolboxScreenHost,
 		private readonly theme: Theme,
-		resolveProjectLabel: () => Promise<string>,
-	) {
-		void resolveProjectLabel()
-			.then((label) => {
-				this.projectLabel = label;
-				this.host.requestRender();
-			})
-			.catch(() => {
-				this.projectLabel = "unavailable";
-				this.host.requestRender();
-			});
-	}
+		private readonly projectLabel: string,
+	) {}
 
 	render(width: number): string[] {
 		const lines = [this.theme.fg("muted", `Project: ${this.projectLabel}`)];

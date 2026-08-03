@@ -1,14 +1,17 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
 import type { Theme } from "@earendil-works/pi-coding-agent";
-import { Editor, type EditorTheme, Key, matchesKey, wrapTextWithAnsi, type TUI } from "@earendil-works/pi-tui";
+import { Editor, type EditorTheme, Key, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { WorkflowModelProfile } from "../domain.ts";
 import { formatModelProfile, supportsThinkingLevel } from "../model/client.ts";
 import type { PromptPolishWorkflow } from "../workflows/polish.ts";
 import { ModelPicker } from "./model-picker.ts";
 import type { ToolboxScreen, ToolboxScreenHost } from "./screen.ts";
 
-type PolishMode = "ready" | "selecting-model" | "generating" | "result" | "editing" | "error";
-type PickerReturnMode = "ready" | "result" | "error";
+type PolishMode = "workspace" | "selecting-model" | "generating";
+type FocusTarget = "source" | "result" | "actions";
+type CopyState = "idle" | "copying" | "copied" | "failed";
+
+const ACTION_COUNT = 5;
 
 interface PromptPolishScreenOptions {
 	host: ToolboxScreenHost;
@@ -19,24 +22,38 @@ interface PromptPolishScreenOptions {
 	models: readonly Model<Api>[];
 	workflow: PromptPolishWorkflow;
 	onAccept: (text: string) => void;
+	onCopy: (text: string) => Promise<void>;
 	onSaveDefault: (profile: WorkflowModelProfile) => Promise<void>;
 }
 
 export class PromptPolishScreen implements ToolboxScreen {
-	private mode: PolishMode = "ready";
+	private mode: PolishMode = "workspace";
+	private focusTarget: FocusTarget = "source";
+	private focusBeforePicker: FocusTarget = "source";
 	private profile: WorkflowModelProfile;
-	private result = "";
 	private errorMessage = "";
+	private copyState: CopyState = "idle";
+	private copyErrorMessage = "";
 	private actionIndex = 0;
-	private pickerReturnMode: PickerReturnMode = "ready";
 	private modelPicker: ModelPicker | null = null;
 	private request: AbortController | null = null;
-	private readonly editor: Editor;
+	private disposed = false;
+	private hostFocused = false;
+	private readonly sourceEditor: Editor;
+	private readonly resultEditor: Editor;
 
 	constructor(private readonly options: PromptPolishScreenOptions) {
 		this.profile = options.profile;
-		this.editor = new Editor(options.tui, createEditorTheme(options.theme));
-		this.editor.onSubmit = (value) => this.finishEditing(value);
+		this.sourceEditor = new Editor(options.tui, createEditorTheme(options.theme));
+		this.resultEditor = new Editor(options.tui, createEditorTheme(options.theme));
+		this.sourceEditor.setText(options.source);
+		this.sourceEditor.onChange = () => {
+			this.errorMessage = "";
+		};
+		this.resultEditor.onChange = () => {
+			this.errorMessage = "";
+			this.clearCopyFeedback();
+		};
 
 		const profileAvailable = options.models.some(
 			(model) =>
@@ -45,8 +62,19 @@ export class PromptPolishScreen implements ToolboxScreen {
 				supportsThinkingLevel(model, this.profile.thinkingLevel),
 		);
 		if (!profileAvailable) {
-			this.openModelPicker("ready");
+			this.openModelPicker();
+		} else if (options.source.trim().length > 0) {
+			queueMicrotask(() => {
+				if (!this.disposed) {
+					this.startPolish();
+				}
+			});
 		}
+	}
+
+	setFocused(focused: boolean): void {
+		this.hostFocused = focused;
+		this.updateEditorFocus();
 	}
 
 	render(width: number): string[] {
@@ -54,35 +82,36 @@ export class PromptPolishScreen implements ToolboxScreen {
 			return this.modelPicker.render(width);
 		}
 
+		this.updateEditorBorders();
 		const lines = [this.renderProfile(), ""];
-		lines.push(...renderTextSection("Source", this.options.source, width, this.options.theme));
+		lines.push(this.renderEditorLabel("Source prompt", "source"));
+		lines.push(...this.sourceEditor.render(width));
+		lines.push("", this.renderEditorLabel("Polished prompt", "result"));
+		lines.push(...this.resultEditor.render(width));
 
 		if (this.mode === "generating") {
 			lines.push("", this.options.theme.fg("accent", "Polishing…"));
-			lines.push(this.options.theme.fg("dim", "Esc cancel request"));
-			return lines;
 		}
-		if (this.mode === "editing") {
-			lines.push("", this.options.theme.fg("accent", this.options.theme.bold("Edit polished prompt")), "");
-			lines.push(...this.editor.render(width));
-			lines.push("", this.options.theme.fg("dim", "Enter save  Shift+Enter newline  Esc discard edits"));
-			return lines;
-		}
-		if (this.mode === "result") {
-			lines.push("", ...renderTextSection("Polished", this.result, width, this.options.theme));
-			lines.push("", this.renderActions(["Accept", "Edit", "Retry", "Cancel"]));
-			lines.push(this.options.theme.fg("dim", "←→/↑↓ select  Enter confirm  Esc back"));
-			return lines;
-		}
-		if (this.mode === "error") {
+		if (this.errorMessage) {
 			lines.push("", this.options.theme.fg("error", this.errorMessage));
-			lines.push("", this.renderActions(["Retry", "Model", "Cancel"]));
-			lines.push(this.options.theme.fg("dim", "←→/↑↓ select  Enter confirm  Esc back"));
-			return lines;
+		}
+		if (this.copyState === "copied") {
+			lines.push("", this.options.theme.fg("success", "Copied to clipboard"));
+		} else if (this.copyState === "failed") {
+			lines.push("", this.options.theme.fg("error", `Copy failed: ${this.copyErrorMessage}`));
 		}
 
-		lines.push("", this.renderActions(["Polish", "Model", "Cancel"]));
-		lines.push(this.options.theme.fg("dim", "←→/↑↓ select  Enter confirm  Esc back"));
+		const polishAction = this.mode === "generating" ? "Polishing…" : "Polish";
+		const copyAction = this.copyState === "copying" ? "Copying…" : "Copy";
+		lines.push("", this.renderActions([polishAction, "Model", "Accept", copyAction, "Cancel"]));
+		lines.push(
+			this.options.theme.fg(
+				"dim",
+				this.mode === "generating"
+					? "Ctrl+C copy current result  Esc cancel request"
+					: "Tab/Shift+Tab switch focus  Enter newline/confirm  Ctrl+Enter polish  Ctrl+C copy  Esc back",
+			),
+		);
 		return lines;
 	}
 
@@ -92,44 +121,54 @@ export class PromptPolishScreen implements ToolboxScreen {
 			this.options.host.requestRender();
 			return;
 		}
+		if (matchesKey(data, Key.ctrl("c")) && this.hasPolishedPrompt()) {
+			this.copyResult();
+			return;
+		}
 		if (this.mode === "generating") {
 			if (matchesKey(data, Key.escape)) {
 				this.cancelRequest();
 			}
 			return;
 		}
-		if (this.mode === "editing") {
-			if (matchesKey(data, Key.escape)) {
-				this.mode = "result";
-				this.options.host.requestRender();
-				return;
-			}
-			this.editor.handleInput(data);
-			this.options.host.requestRender();
+		if (matchesKey(data, Key.ctrl("enter"))) {
+			this.startPolish();
+			return;
+		}
+		if (matchesKey(data, Key.tab)) {
+			this.moveFocus(1);
+			return;
+		}
+		if (matchesKey(data, Key.shift("tab"))) {
+			this.moveFocus(-1);
 			return;
 		}
 		if (matchesKey(data, Key.escape)) {
 			this.options.host.back();
 			return;
 		}
-		if (matchesKey(data, Key.left) || matchesKey(data, Key.up)) {
-			this.moveAction(-1);
+
+		if (this.focusTarget === "actions") {
+			this.handleActionInput(data);
 			return;
 		}
-		if (matchesKey(data, Key.right) || matchesKey(data, Key.down)) {
-			this.moveAction(1);
-			return;
-		}
+
+		const editor = this.focusTarget === "source" ? this.sourceEditor : this.resultEditor;
 		if (matchesKey(data, Key.enter)) {
-			this.runSelectedAction();
+			editor.handleInput("\n");
+		} else {
+			editor.handleInput(data);
 		}
+		this.options.host.requestRender();
 	}
 
 	invalidate(): void {
-		this.editor.invalidate();
+		this.sourceEditor.invalidate();
+		this.resultEditor.invalidate();
 	}
 
 	dispose(): void {
+		this.disposed = true;
 		this.request?.abort();
 		this.request = null;
 	}
@@ -139,130 +178,179 @@ export class PromptPolishScreen implements ToolboxScreen {
 		return `${this.options.theme.fg("muted", "Model:")} ${this.options.theme.fg("text", model)}  ${this.options.theme.fg("muted", "Thinking:")} ${this.options.theme.fg("text", this.profile.thinkingLevel)}`;
 	}
 
+	private renderEditorLabel(label: string, target: Exclude<FocusTarget, "actions">): string {
+		const marker = this.focusTarget === target ? "▸ " : "  ";
+		const color = this.focusTarget === target ? "accent" : "muted";
+		return this.options.theme.fg(color, this.options.theme.bold(`${marker}${label}`));
+	}
+
 	private renderActions(actions: readonly string[]): string {
 		return actions
 			.map((action, index) => {
-				return index === this.actionIndex
+				const selected = this.focusTarget === "actions" && index === this.actionIndex;
+				return selected
 					? this.options.theme.fg("accent", `[ ${action} ]`)
 					: this.options.theme.fg("muted", `  ${action}  `);
 			})
 			.join(" ");
 	}
 
-	private moveAction(direction: -1 | 1): void {
-		const actionCount = this.mode === "result" ? 4 : 3;
-		this.actionIndex = (this.actionIndex + direction + actionCount) % actionCount;
+	private updateEditorBorders(): void {
+		this.sourceEditor.borderColor = (text) =>
+			this.options.theme.fg(this.focusTarget === "source" ? "accent" : "borderMuted", text);
+		this.resultEditor.borderColor = (text) =>
+			this.options.theme.fg(this.focusTarget === "result" ? "accent" : "borderMuted", text);
+	}
+
+	private updateEditorFocus(): void {
+		const editorsInteractive = this.mode === "workspace";
+		this.sourceEditor.focused = this.hostFocused && editorsInteractive && this.focusTarget === "source";
+		this.resultEditor.focused = this.hostFocused && editorsInteractive && this.focusTarget === "result";
+	}
+
+	private moveFocus(direction: -1 | 1): void {
+		const targets: readonly FocusTarget[] = ["source", "result", "actions"];
+		const current = targets.indexOf(this.focusTarget);
+		this.setFocusTarget(targets[(current + direction + targets.length) % targets.length]!);
+	}
+
+	private setFocusTarget(target: FocusTarget): void {
+		this.focusTarget = target;
+		this.updateEditorFocus();
 		this.options.host.requestRender();
 	}
 
-	private runSelectedAction(): void {
-		if (this.mode === "result") {
-			this.runResultAction();
-			return;
-		}
-		if (this.mode === "error") {
-			this.runErrorAction();
-			return;
-		}
-		this.runReadyAction();
-	}
-
-	private runReadyAction(): void {
-		if (this.actionIndex === 0) {
-			this.startPolish();
-			return;
-		}
-		if (this.actionIndex === 1) {
-			this.openModelPicker("ready");
-			return;
-		}
-		this.options.host.close();
-	}
-
-	private runResultAction(): void {
-		if (this.actionIndex === 0) {
-			this.options.onAccept(this.result);
-			this.options.host.close();
-			return;
-		}
-		if (this.actionIndex === 1) {
-			this.editor.setText(this.result);
-			this.mode = "editing";
+	private handleActionInput(data: string): void {
+		if (matchesKey(data, Key.left) || matchesKey(data, Key.up)) {
+			this.actionIndex = (this.actionIndex - 1 + ACTION_COUNT) % ACTION_COUNT;
 			this.options.host.requestRender();
 			return;
 		}
-		if (this.actionIndex === 2) {
-			this.startPolish();
+		if (matchesKey(data, Key.right) || matchesKey(data, Key.down)) {
+			this.actionIndex = (this.actionIndex + 1) % ACTION_COUNT;
+			this.options.host.requestRender();
 			return;
 		}
+		if (matchesKey(data, Key.enter)) {
+			this.runSelectedAction();
+		}
+	}
+
+	private runSelectedAction(): void {
+		switch (this.actionIndex) {
+			case 0:
+				this.startPolish();
+				return;
+			case 1:
+				this.openModelPicker();
+				return;
+			case 2:
+				this.acceptResult();
+				return;
+			case 3:
+				this.copyResult();
+				return;
+			default:
+				this.options.host.close();
+		}
+	}
+
+	private acceptResult(): void {
+		const result = this.resultEditor.getExpandedText();
+		if (result.trim().length === 0) {
+			this.showError("Polish the prompt or enter a result before accepting");
+			return;
+		}
+		this.options.onAccept(result);
 		this.options.host.close();
 	}
 
-	private runErrorAction(): void {
-		if (this.actionIndex === 0) {
-			this.startPolish();
+	private hasPolishedPrompt(): boolean {
+		return this.resultEditor.getExpandedText().trim().length > 0;
+	}
+
+	private copyResult(): void {
+		if (this.copyState === "copying") {
 			return;
 		}
-		if (this.actionIndex === 1) {
-			this.openModelPicker("error");
+		const result = this.resultEditor.getExpandedText();
+		if (result.trim().length === 0) {
+			this.showError("Polish the prompt or enter a result before copying");
 			return;
 		}
-		this.options.host.close();
+
+		this.copyState = "copying";
+		this.copyErrorMessage = "";
+		this.errorMessage = "";
+		this.options.host.requestRender();
+
+		void this.options
+			.onCopy(result)
+			.then(() => {
+				if (this.disposed || this.resultEditor.getExpandedText() !== result) {
+					return;
+				}
+				this.copyState = "copied";
+				this.options.host.requestRender();
+			})
+			.catch((error: unknown) => {
+				if (this.disposed || this.resultEditor.getExpandedText() !== result) {
+					return;
+				}
+				this.copyState = "failed";
+				this.copyErrorMessage = errorMessage(error);
+				this.options.host.requestRender();
+			});
 	}
 
 	private startPolish(): void {
-		if (this.options.source.trim().length === 0) {
-			this.showError("Enter a prompt in the Pi editor before opening Prompt Polish");
+		const source = this.sourceEditor.getExpandedText();
+		if (source.trim().length === 0) {
+			this.showError("Enter a source prompt before polishing");
+			this.setFocusTarget("source");
 			return;
 		}
 
 		const request = new AbortController();
 		this.request = request;
+		this.errorMessage = "";
+		this.clearCopyFeedback();
 		this.mode = "generating";
+		this.updateEditorFocus();
 		this.options.host.requestRender();
 
 		void this.options.workflow
-			.polish(this.options.source, this.profile, request.signal)
+			.polish(source, this.profile, request.signal)
 			.then((result) => {
-				if (this.request !== request || request.signal.aborted) {
+				if (this.request !== request || request.signal.aborted || this.disposed) {
 					return;
 				}
 				this.request = null;
-				this.result = result;
-				this.actionIndex = 0;
-				this.mode = "result";
-				this.options.host.requestRender();
+				this.mode = "workspace";
+				this.resultEditor.setText(result);
+				this.setFocusTarget("result");
 			})
 			.catch((error: unknown) => {
-				if (this.request !== request || request.signal.aborted) {
+				if (this.request !== request || request.signal.aborted || this.disposed) {
 					return;
 				}
 				this.request = null;
+				this.mode = "workspace";
 				this.showError(errorMessage(error));
+				this.updateEditorFocus();
 			});
 	}
 
 	private cancelRequest(): void {
 		this.request?.abort();
 		this.request = null;
-		this.mode = "ready";
-		this.actionIndex = 0;
+		this.mode = "workspace";
+		this.updateEditorFocus();
 		this.options.host.requestRender();
 	}
 
-	private finishEditing(value: string): void {
-		if (value.trim().length === 0) {
-			this.showError("The polished prompt cannot be empty");
-			return;
-		}
-		this.result = value;
-		this.mode = "result";
-		this.actionIndex = 0;
-		this.options.host.requestRender();
-	}
-
-	private openModelPicker(returnMode: PickerReturnMode): void {
-		this.pickerReturnMode = returnMode;
+	private openModelPicker(): void {
+		this.focusBeforePicker = this.focusTarget;
 		this.modelPicker = new ModelPicker(
 			this.options.models,
 			this.profile,
@@ -271,6 +359,7 @@ export class PromptPolishScreen implements ToolboxScreen {
 			() => this.closeModelPicker(),
 		);
 		this.mode = "selecting-model";
+		this.updateEditorFocus();
 		this.options.host.requestRender();
 	}
 
@@ -282,37 +371,32 @@ export class PromptPolishScreen implements ToolboxScreen {
 		}
 
 		void this.options.onSaveDefault(profile).catch((error: unknown) => {
-			this.showError(errorMessage(error));
+			if (!this.disposed) {
+				this.showError(errorMessage(error));
+			}
 		});
 	}
 
 	private closeModelPicker(): void {
 		this.modelPicker = null;
-		this.mode = this.pickerReturnMode;
-		this.actionIndex = 0;
-		this.options.host.requestRender();
+		this.mode = "workspace";
+		this.setFocusTarget(this.focusBeforePicker);
+	}
+
+	private clearCopyFeedback(): void {
+		this.copyState = "idle";
+		this.copyErrorMessage = "";
 	}
 
 	private showError(message: string): void {
 		this.errorMessage = message;
-		this.mode = "error";
-		this.actionIndex = 0;
 		this.options.host.requestRender();
 	}
 }
 
-function renderTextSection(label: string, text: string, width: number, theme: Theme): string[] {
-	const wrapped = wrapTextWithAnsi(text.length > 0 ? text : "(empty)", Math.max(1, width));
-	const visible = wrapped.slice(0, 7);
-	if (wrapped.length > visible.length && visible.length > 0) {
-		visible[visible.length - 1] = `${visible[visible.length - 1]}…`;
-	}
-	return [theme.fg("accent", theme.bold(label)), ...visible.map((line) => theme.fg("text", line))];
-}
-
 function createEditorTheme(theme: Theme): EditorTheme {
 	return {
-		borderColor: (text) => theme.fg("accent", text),
+		borderColor: (text) => theme.fg("borderMuted", text),
 		selectList: {
 			selectedPrefix: (text) => theme.fg("accent", text),
 			selectedText: (text) => theme.fg("accent", text),

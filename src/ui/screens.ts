@@ -1,12 +1,12 @@
 import type { Api, Model } from "@earendil-works/pi-ai";
-import type { ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
+import { copyToClipboard, type ExtensionContext, type Theme } from "@earendil-works/pi-coding-agent";
 import type { TUI } from "@earendil-works/pi-tui";
-import { DEFAULT_PROMPT_POLISH_PROFILE, type ToolboxConfig, type WorkflowModelProfile } from "../domain.ts";
+import type { ToolboxConfig } from "../domain.ts";
+import type { ToolboxConfigStore } from "../config.ts";
 import { WorkflowModelClient } from "../model/client.ts";
-import type { ToolboxRuntime } from "../runtime.ts";
+import { appendContextReferences, ContextFinderWorkflow } from "../workflows/context-finder.ts";
 import { PromptPolishWorkflow } from "../workflows/polish.ts";
-import { FeatureSpecScreen } from "./feature-spec.ts";
-import { ImplementationScreen } from "./implementation.ts";
+import { ContextFinderScreen } from "./context-finder.ts";
 import { LandingScreen } from "./landing.ts";
 import { PromptPolishScreen } from "./polish.ts";
 import type { ToolboxScreenFactories } from "./screen.ts";
@@ -16,18 +16,18 @@ interface ToolboxScreenDependencies {
 	tui: TUI;
 	theme: Theme;
 	config: ToolboxConfig;
-	runtime: ToolboxRuntime;
+	configStore: ToolboxConfigStore;
+	submitPrompt: (prompt: string) => void;
 }
 
 export function createToolboxScreens(dependencies: ToolboxScreenDependencies): ToolboxScreenFactories {
-	const { ctx, tui, theme, config, runtime } = dependencies;
+	const { ctx, tui, theme, config, configStore, submitPrompt } = dependencies;
 	const workflow = new PromptPolishWorkflow(new WorkflowModelClient(ctx.modelRegistry));
 	const models = availableModels(ctx);
-	let configuredProfile = config.models.prompt_polish ?? DEFAULT_PROMPT_POLISH_PROFILE;
+	let configuredProfile = config.models.prompt_polish;
 
 	return {
-		landing: (host) =>
-			new LandingScreen(host, theme, async () => (await runtime.resolveProject(ctx.cwd)).repositoryLabel),
+		landing: (host) => new LandingScreen(host, theme, ctx.cwd),
 		polish: (host) =>
 			new PromptPolishScreen({
 				host,
@@ -38,32 +38,33 @@ export function createToolboxScreens(dependencies: ToolboxScreenDependencies): T
 				models,
 				workflow,
 				onAccept: (text) => ctx.ui.setEditorText(text),
+				onCopy: copyToClipboard,
 				onSaveDefault: async (profile) => {
-					await runtime.config.saveModelProfile("prompt_polish", profile);
+					await configStore.saveModelProfile("prompt_polish", profile);
 					configuredProfile = profile;
 				},
 			}),
-		"feature-spec-list": (host) =>
-			new FeatureSpecScreen({
+		"context-finder": (host) =>
+			new ContextFinderScreen({
 				host,
 				tui,
 				theme,
-				models,
-				defaultProfile: featureSpecProfile(config, ctx),
-				configStore: runtime.config,
-				repository: runtime.featureSpecRepository(),
-				workflow: runtime.createFeatureSpecWorkflow(ctx.modelRegistry),
-				resolveProject: () => runtime.resolveProject(ctx.cwd),
-			}),
-		"implementation-list": (host) =>
-			new ImplementationScreen({
-				host,
-				theme,
-				models,
-				defaultProfile: implementationProfile(config, ctx),
-				configStore: runtime.config,
-				repository: runtime.implementationRepository(),
-				resolveProject: () => runtime.resolveProject(ctx.cwd),
+				prompt: ctx.ui.getEditorText(),
+				cwd: ctx.cwd,
+				workflow: new ContextFinderWorkflow(),
+				onSubmit: (prompt, references) => {
+					const finalPrompt = appendContextReferences(prompt, references);
+					ctx.ui.setEditorText("");
+					try {
+						submitPrompt(finalPrompt);
+					} catch (error) {
+						ctx.ui.setEditorText(finalPrompt);
+						ctx.ui.notify(
+							`Unable to submit the context-enriched prompt: ${error instanceof Error ? error.message : String(error)}`,
+							"error",
+						);
+					}
+				},
 			}),
 	};
 }
@@ -74,28 +75,6 @@ function availableModels(ctx: ExtensionContext): Model<Api>[] {
 		models.push(ctx.model);
 	}
 	return models;
-}
-
-function featureSpecProfile(config: ToolboxConfig, ctx: ExtensionContext): WorkflowModelProfile {
-	const configured = config.models.feature_spec;
-	if (configured) {
-		return configured;
-	}
-	if (!ctx.model) {
-		return DEFAULT_PROMPT_POLISH_PROFILE;
-	}
-	return { provider: ctx.model.provider, model: ctx.model.id, thinkingLevel: "high" };
-}
-
-function implementationProfile(config: ToolboxConfig, ctx: ExtensionContext): WorkflowModelProfile {
-	const configured = config.models.implementation;
-	if (configured) {
-		return configured;
-	}
-	if (!ctx.model) {
-		return DEFAULT_PROMPT_POLISH_PROFILE;
-	}
-	return { provider: ctx.model.provider, model: ctx.model.id, thinkingLevel: "high" };
 }
 
 function sameModel(left: Model<Api>, right: Model<Api>): boolean {

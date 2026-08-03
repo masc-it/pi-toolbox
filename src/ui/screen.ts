@@ -4,6 +4,7 @@ export interface ToolboxScreen {
 	render(width: number): string[];
 	handleInput(data: string): void;
 	invalidate(): void;
+	setFocused?(focused: boolean): void;
 	dispose?(): void;
 }
 
