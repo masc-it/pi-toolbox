@@ -1,17 +1,20 @@
-import type { Api, Model } from "@earendil-works/pi-ai";
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Editor, type EditorTheme, Key, matchesKey, type TUI } from "@earendil-works/pi-tui";
 import type { WorkflowModelProfile } from "../domain.ts";
-import { formatModelProfile, supportsThinkingLevel } from "../model/client.ts";
+import { formatModelProfile } from "../model/client.ts";
 import type { PromptPolishWorkflow } from "../workflows/polish.ts";
-import { ModelPicker } from "./model-picker.ts";
 import type { ToolboxScreen, ToolboxScreenHost } from "./screen.ts";
 
-type PolishMode = "workspace" | "selecting-model" | "generating";
+type PolishMode = "workspace" | "generating";
 type FocusTarget = "source" | "result" | "actions";
 type CopyState = "idle" | "copying" | "copied" | "failed";
 
-const ACTION_COUNT = 5;
+const ACTIONS = [
+	{ label: "Accept", shortcut: "Ctrl+S" },
+	{ label: "Copy", shortcut: "Ctrl+C" },
+	{ label: "Polish", shortcut: "Ctrl+Enter" },
+] as const;
+const ACTION_COUNT = ACTIONS.length;
 
 interface PromptPolishScreenOptions {
 	host: ToolboxScreenHost;
@@ -19,23 +22,18 @@ interface PromptPolishScreenOptions {
 	theme: Theme;
 	source: string;
 	profile: WorkflowModelProfile;
-	models: readonly Model<Api>[];
 	workflow: PromptPolishWorkflow;
 	onAccept: (text: string) => void;
 	onCopy: (text: string) => Promise<void>;
-	onSaveDefault: (profile: WorkflowModelProfile) => Promise<void>;
 }
 
 export class PromptPolishScreen implements ToolboxScreen {
 	private mode: PolishMode = "workspace";
 	private focusTarget: FocusTarget = "source";
-	private focusBeforePicker: FocusTarget = "source";
-	private profile: WorkflowModelProfile;
 	private errorMessage = "";
 	private copyState: CopyState = "idle";
 	private copyErrorMessage = "";
 	private actionIndex = 0;
-	private modelPicker: ModelPicker | null = null;
 	private request: AbortController | null = null;
 	private disposed = false;
 	private hostFocused = false;
@@ -43,7 +41,6 @@ export class PromptPolishScreen implements ToolboxScreen {
 	private readonly resultEditor: Editor;
 
 	constructor(private readonly options: PromptPolishScreenOptions) {
-		this.profile = options.profile;
 		this.sourceEditor = new Editor(options.tui, createEditorTheme(options.theme));
 		this.resultEditor = new Editor(options.tui, createEditorTheme(options.theme));
 		this.sourceEditor.setText(options.source);
@@ -55,15 +52,7 @@ export class PromptPolishScreen implements ToolboxScreen {
 			this.clearCopyFeedback();
 		};
 
-		const profileAvailable = options.models.some(
-			(model) =>
-				model.provider === this.profile.provider &&
-				model.id === this.profile.model &&
-				supportsThinkingLevel(model, this.profile.thinkingLevel),
-		);
-		if (!profileAvailable) {
-			this.openModelPicker();
-		} else if (options.source.trim().length > 0) {
+		if (options.source.trim().length > 0) {
 			queueMicrotask(() => {
 				if (!this.disposed) {
 					this.startPolish();
@@ -78,10 +67,6 @@ export class PromptPolishScreen implements ToolboxScreen {
 	}
 
 	render(width: number): string[] {
-		if (this.mode === "selecting-model" && this.modelPicker) {
-			return this.modelPicker.render(width);
-		}
-
 		this.updateEditorBorders();
 		const lines = [this.renderProfile(), ""];
 		lines.push(this.renderEditorLabel("Source prompt", "source"));
@@ -101,27 +86,21 @@ export class PromptPolishScreen implements ToolboxScreen {
 			lines.push("", this.options.theme.fg("error", `Copy failed: ${this.copyErrorMessage}`));
 		}
 
-		const polishAction = this.mode === "generating" ? "Polishing…" : "Polish";
-		const copyAction = this.copyState === "copying" ? "Copying…" : "Copy";
-		lines.push("", this.renderActions([polishAction, "Model", "Accept", copyAction, "Cancel"]));
-		lines.push(
-			this.options.theme.fg(
-				"dim",
-				this.mode === "generating"
-					? "Ctrl+C copy current result  Esc cancel request"
-					: "Tab/Shift+Tab switch focus  Enter newline/confirm  Ctrl+Enter polish  Ctrl+C copy  Esc back",
-			),
-		);
+		lines.push("", ...this.renderActions(), "");
+		const help =
+			this.mode === "generating"
+				? ["Esc cancel request"]
+				: ["Tab/Shift+Tab switch focus", "↑↓ select action", "Enter confirm", "Esc back"];
+		lines.push(...help.map((text) => this.options.theme.fg("dim", text)));
 		return lines;
 	}
 
 	handleInput(data: string): void {
-		if (this.mode === "selecting-model" && this.modelPicker) {
-			this.modelPicker.handleInput(data);
-			this.options.host.requestRender();
+		if (matchesKey(data, Key.ctrl("s"))) {
+			this.acceptResult();
 			return;
 		}
-		if (matchesKey(data, Key.ctrl("c")) && this.hasPolishedPrompt()) {
+		if (matchesKey(data, Key.ctrl("c"))) {
 			this.copyResult();
 			return;
 		}
@@ -174,8 +153,8 @@ export class PromptPolishScreen implements ToolboxScreen {
 	}
 
 	private renderProfile(): string {
-		const model = formatModelProfile(this.profile);
-		return `${this.options.theme.fg("muted", "Model:")} ${this.options.theme.fg("text", model)}  ${this.options.theme.fg("muted", "Thinking:")} ${this.options.theme.fg("text", this.profile.thinkingLevel)}`;
+		const model = formatModelProfile(this.options.profile);
+		return `${this.options.theme.fg("muted", "Model:")} ${this.options.theme.fg("text", model)}  ${this.options.theme.fg("muted", "Thinking:")} ${this.options.theme.fg("text", this.options.profile.thinkingLevel)}`;
 	}
 
 	private renderEditorLabel(label: string, target: Exclude<FocusTarget, "actions">): string {
@@ -184,15 +163,14 @@ export class PromptPolishScreen implements ToolboxScreen {
 		return this.options.theme.fg(color, this.options.theme.bold(`${marker}${label}`));
 	}
 
-	private renderActions(actions: readonly string[]): string {
-		return actions
-			.map((action, index) => {
-				const selected = this.focusTarget === "actions" && index === this.actionIndex;
-				return selected
-					? this.options.theme.fg("accent", `[ ${action} ]`)
-					: this.options.theme.fg("muted", `  ${action}  `);
-			})
-			.join(" ");
+	private renderActions(): string[] {
+		return ACTIONS.map((action, index) => {
+			const label = `${action.label} (${action.shortcut})`;
+			const selected = this.focusTarget === "actions" && index === this.actionIndex;
+			return selected
+				? this.options.theme.fg("accent", `[ ${label} ]`)
+				: this.options.theme.fg("muted", `  ${label}  `);
+		});
 	}
 
 	private updateEditorBorders(): void {
@@ -221,12 +199,12 @@ export class PromptPolishScreen implements ToolboxScreen {
 	}
 
 	private handleActionInput(data: string): void {
-		if (matchesKey(data, Key.left) || matchesKey(data, Key.up)) {
+		if (matchesKey(data, Key.up)) {
 			this.actionIndex = (this.actionIndex - 1 + ACTION_COUNT) % ACTION_COUNT;
 			this.options.host.requestRender();
 			return;
 		}
-		if (matchesKey(data, Key.right) || matchesKey(data, Key.down)) {
+		if (matchesKey(data, Key.down)) {
 			this.actionIndex = (this.actionIndex + 1) % ACTION_COUNT;
 			this.options.host.requestRender();
 			return;
@@ -239,19 +217,13 @@ export class PromptPolishScreen implements ToolboxScreen {
 	private runSelectedAction(): void {
 		switch (this.actionIndex) {
 			case 0:
-				this.startPolish();
-				return;
-			case 1:
-				this.openModelPicker();
-				return;
-			case 2:
 				this.acceptResult();
 				return;
-			case 3:
+			case 1:
 				this.copyResult();
 				return;
 			default:
-				this.options.host.close();
+				this.startPolish();
 		}
 	}
 
@@ -261,12 +233,8 @@ export class PromptPolishScreen implements ToolboxScreen {
 			this.showError("Polish the prompt or enter a result before accepting");
 			return;
 		}
-		this.options.onAccept(result);
 		this.options.host.close();
-	}
-
-	private hasPolishedPrompt(): boolean {
-		return this.resultEditor.getExpandedText().trim().length > 0;
+		this.options.onAccept(result);
 	}
 
 	private copyResult(): void {
@@ -320,13 +288,14 @@ export class PromptPolishScreen implements ToolboxScreen {
 		this.options.host.requestRender();
 
 		void this.options.workflow
-			.polish(source, this.profile, request.signal)
+			.polish(source, this.options.profile, request.signal)
 			.then((result) => {
 				if (this.request !== request || request.signal.aborted || this.disposed) {
 					return;
 				}
 				this.request = null;
 				this.mode = "workspace";
+				this.errorMessage = "";
 				this.resultEditor.setText(result);
 				this.setFocusTarget("result");
 			})
@@ -347,40 +316,6 @@ export class PromptPolishScreen implements ToolboxScreen {
 		this.mode = "workspace";
 		this.updateEditorFocus();
 		this.options.host.requestRender();
-	}
-
-	private openModelPicker(): void {
-		this.focusBeforePicker = this.focusTarget;
-		this.modelPicker = new ModelPicker(
-			this.options.models,
-			this.profile,
-			this.options.theme,
-			(profile, saveAsDefault) => this.selectProfile(profile, saveAsDefault),
-			() => this.closeModelPicker(),
-		);
-		this.mode = "selecting-model";
-		this.updateEditorFocus();
-		this.options.host.requestRender();
-	}
-
-	private selectProfile(profile: WorkflowModelProfile, saveAsDefault: boolean): void {
-		this.profile = profile;
-		this.closeModelPicker();
-		if (!saveAsDefault) {
-			return;
-		}
-
-		void this.options.onSaveDefault(profile).catch((error: unknown) => {
-			if (!this.disposed) {
-				this.showError(errorMessage(error));
-			}
-		});
-	}
-
-	private closeModelPicker(): void {
-		this.modelPicker = null;
-		this.mode = "workspace";
-		this.setFocusTarget(this.focusBeforePicker);
 	}
 
 	private clearCopyFeedback(): void {

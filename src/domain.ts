@@ -1,7 +1,5 @@
 import type { ModelThinkingLevel } from "@earendil-works/pi-ai";
 
-export type WorkflowId = "prompt_polish";
-
 export interface WorkflowModelProfile {
 	provider: string;
 	model: string;

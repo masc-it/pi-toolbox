@@ -38,7 +38,6 @@ export class ToolboxOverlayController {
 						tui,
 						theme,
 						config,
-						configStore: this.configStore,
 						submitPrompt: this.submitPrompt,
 					});
 					const overlay = new ToolboxOverlay(view, tui, theme, screens, () => done());

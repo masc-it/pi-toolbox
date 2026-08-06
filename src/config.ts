@@ -1,11 +1,10 @@
-import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
-import { dirname, join } from "node:path";
+import { readFile } from "node:fs/promises";
+import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 import {
 	DEFAULT_PROMPT_POLISH_PROFILE,
 	THINKING_LEVELS,
 	type ToolboxConfig,
-	type WorkflowId,
 	type WorkflowModelProfile,
 } from "./domain.ts";
 
@@ -29,19 +28,6 @@ export class ToolboxConfigStore {
 			}
 			throw new Error(`Unable to read Pi Toolbox config at ${this.path}`, { cause: error });
 		}
-	}
-
-	async saveModelProfile(workflow: WorkflowId, profile: WorkflowModelProfile): Promise<ToolboxConfig> {
-		const config = await this.load();
-		const updated: ToolboxConfig = {
-			models: {
-				...config.models,
-				[workflow]: profile,
-			},
-		};
-
-		await writeJsonAtomically(this.path, updated);
-		return updated;
 	}
 }
 
@@ -87,19 +73,6 @@ function parseOptionalProfile(value: unknown): WorkflowModelProfile | null {
 		model: value.model,
 		thinkingLevel: value.thinkingLevel,
 	};
-}
-
-async function writeJsonAtomically(path: string, value: ToolboxConfig): Promise<void> {
-	await mkdir(dirname(path), { recursive: true });
-	const temporaryPath = `${path}.${process.pid}.${Date.now()}.tmp`;
-
-	try {
-		await writeFile(temporaryPath, `${JSON.stringify(value, null, 2)}\n`, { encoding: "utf8", mode: 0o600 });
-		await rename(temporaryPath, path);
-	} catch (error) {
-		await rm(temporaryPath, { force: true });
-		throw new Error(`Unable to save Pi Toolbox config at ${path}`, { cause: error });
-	}
 }
 
 function isThinkingLevel(value: unknown): value is WorkflowModelProfile["thinkingLevel"] {
