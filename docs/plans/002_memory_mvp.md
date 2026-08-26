@@ -260,16 +260,16 @@ Boundary validation is strict:
 
 ### Phase 1: Storage and knowledge-base boundaries
 
-Status: todo
+Status: done
 
 Build the SQLite store, queue schema, indices, topic validation, canonical path handling, and OKF validation boundary.
 
 Tasks:
 
-- Status: todo - Add Memory configuration and fixed MVP paths.
-- Status: todo - Add SQLite initialization and queue operations.
-- Status: todo - Add the pending-row queries and `cwd` batch selection.
-- Status: todo - Add minimum OKF document validation.
+- Status: done - Add Memory configuration and fixed MVP paths.
+- Status: done - Add SQLite initialization and queue operations.
+- Status: done - Add the pending-row queries and `cwd` batch selection.
+- Status: done - Add minimum OKF document validation.
 
 QA checkpoint:
 
