@@ -6,7 +6,7 @@ import { canonicalizeKnowledgeBaseDirectory, resolveKnowledgeBaseDocumentPath } 
 
 export interface ValidatedOkfDocument {
 	path: string;
-	kind: "concept" | "index" | "log";
+	kind: "concept" | "index";
 }
 
 export function validateOkfDocument(
@@ -25,11 +25,6 @@ export function validateOkfDocument(
 		validateIndex(content, dirname(path) === root);
 		return { path, kind: "index" };
 	}
-	if (filename === "log.md") {
-		validateLog(content);
-		return { path, kind: "log" };
-	}
-
 	const topic = relative(root, path).split(sep)[0];
 	if (!isMemoryTopic(topic)) {
 		throw new Error(`Memory concept must be stored under a configured topic: ${documentPath}`);
@@ -69,12 +64,6 @@ function validateIndex(content: string, isRootIndex: boolean): void {
 	}
 	if (typeof frontmatter.okf_version !== "string" || frontmatter.okf_version.trim().length === 0) {
 		throw new Error("Root OKF index frontmatter requires a non-empty okf_version");
-	}
-}
-
-function validateLog(content: string): void {
-	if (content.startsWith("---\n") || content.startsWith("---\r\n")) {
-		throw new Error("OKF log files must not contain frontmatter");
 	}
 }
 
