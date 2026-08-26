@@ -65,15 +65,40 @@ Instructions can contain facts about a project or workflow. Feedback can contain
 - `user`: a user submission.
 - `agent`: the end of an agent run.
 
-## SQLite queue
+## SQLite storage
 
-The queue separates fact extraction from knowledge-base updates. Extractors can finish asynchronously while one curator updates the files at a time.
+The database is stored under the Pi Toolbox data directory, outside the knowledge-base repository. It contains the original messages and the fact queue. SQLite foreign-key enforcement is enabled for every connection.
 
-The database is stored under the Pi Toolbox data directory, outside the knowledge-base repository.
+### Original messages
+
+Every event is stored before extraction starts. `content` contains the original text passed to the extractor. Messages are retained indefinitely so every extraction input remains available for debugging.
+
+```sql
+CREATE TABLE memory_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pi_session_id TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    sent_by TEXT NOT NULL
+        CHECK (sent_by IN ('user', 'agent')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX memory_messages_session_idx
+ON memory_messages (pi_session_id, id);
+```
+
+A message remains stored when extraction produces no facts or fails. The table has no extraction status field.
+
+### Fact queue
+
+The queue separates fact extraction from knowledge-base updates. Extractors can finish asynchronously while one curator updates the files at a time. Every fact references its original message.
 
 ```sql
 CREATE TABLE memory_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL
+        REFERENCES memory_messages (id),
     pi_session_id TEXT NOT NULL,
     cwd TEXT NOT NULL,
     sent_by TEXT NOT NULL
@@ -91,7 +116,7 @@ Processed rows remain in the table with `processed_at` set. They can be inspecte
 
 ### Queue indices
 
-The common queries find the oldest pending fact and then load pending facts for one working directory.
+The common queries find the oldest pending fact, load pending facts for one working directory, and trace facts to their original message.
 
 ```sql
 CREATE INDEX memory_queue_pending_fifo_idx
@@ -101,6 +126,9 @@ WHERE processed_at IS NULL;
 CREATE INDEX memory_queue_pending_cwd_idx
 ON memory_queue (cwd, id)
 WHERE processed_at IS NULL;
+
+CREATE INDEX memory_queue_message_idx
+ON memory_queue (message_id, id);
 ```
 
 ## Agents
@@ -111,13 +139,13 @@ Memory uses two isolated agent roles with `openai-codex/gpt-5.6-luna`.
 
 Thinking effort: `none` (`off` in the current Pi API).
 
-The extractor receives one event and returns a validated list of facts. For each fact it:
+The extractor receives one stored message and returns a validated list of facts. For each fact it:
 
 1. Checks that the statement is explicit.
 2. Assigns one topic.
-3. Writes one queue row with the Pi session, working directory, sender, and creation time.
+3. Writes one queue row linked to the original message, with the Pi session, working directory, sender, and creation time.
 
-An event with no durable facts produces no rows.
+An event with no durable facts produces no queue rows. Its original message remains stored.
 
 1 event -> [0-N] facts.
 
@@ -131,7 +159,7 @@ Rules:
 - Ignore requests and actions unless they also state a fact.
 - Write each fact as one clear, self-contained sentence, using simplified english.
 - Assign exactly one topic: coding, docs-style, personal-principles, projects, or team.
-- Use the working directory only to identify the current project.
+- Use the working directory only to name a project mentioned in the event. Never extract the directory itself as a fact.
 - Return JSON only. Return an empty facts list when there are no facts.
 
 Output:
@@ -191,9 +219,10 @@ Memory runs after every user submission and on every `agent_end` event.
 
 ```text
 Pi event
+  -> insert original message into SQLite
   -> extractor agent
   -> validate explicit facts
-  -> insert facts into SQLite
+  -> insert linked facts into SQLite
   -> wake queue consumer
 
 Queue consumer
@@ -204,7 +233,7 @@ Queue consumer
   -> set processed_at
 ```
 
-The hooks schedule background work and return without delaying the main coding agent. A session start also wakes the consumer so pending facts survive a previous interruption.
+The local message insert completes before the hook returns. Extraction runs in the background without delaying the main coding agent. A session start also wakes the consumer so pending facts survive a previous interruption.
 
 ## Batch consumption
 
@@ -238,7 +267,7 @@ A retry is idempotent. If files already contain the facts, the curator performs 
 
 ## Failure handling
 
-Memory failures do not fail the user's main agent turn. They are logged with the Pi session ID, `cwd`, queue row IDs, stage, and error.
+Memory failures do not fail the user's main agent turn. They are logged with the Pi session ID, `cwd`, message ID, queue row IDs, stage, and error. A stored original message remains available when extraction fails.
 
 Boundary validation is strict:
 
@@ -250,7 +279,8 @@ Boundary validation is strict:
 
 ## MVP features
 
-- **Automatic capture:** Memory observes user submissions and completed agent runs in the background.
+- **Automatic capture:** Memory stores user submissions and completed agent runs, then extracts from them in the background.
+- **Inspectable inputs:** Original messages are retained indefinitely and linked to their extracted facts.
 - **Explicit knowledge:** It stores direct facts under the five initial topics and rejects inference.
 - **Current-state curation:** New facts update OKF concepts, duplicates are ignored, and newer contradictions replace older values.
 - **Project-aware processing:** Facts are queued durably and curated in serialized batches for one working directory.
@@ -280,24 +310,27 @@ QA checkpoint:
 
 ### Phase 2: Fact extraction
 
-Status: todo
+Status: done
 
 Connect the lightweight extractor to user submissions and `agent_end` without blocking the main agent.
 
 Tasks:
 
-- Status: todo - Define the extractor prompt and validated output shape.
-- Status: todo - Run the extractor with `gpt-5.6-luna` and no thinking.
-- Status: todo - Register both Pi lifecycle handlers.
-- Status: todo - Insert one row per extracted fact and wake the consumer.
+- Status: done - Define the extractor prompt and validated output shape.
+- Status: done - Run the extractor with `gpt-5.6-luna` and no thinking.
+- Status: done - Register both Pi lifecycle handlers.
+- Status: done - Persist every original message before extraction.
+- Status: done - Link each extracted fact to its original message.
+- Status: done - Wake the consumer after facts are queued.
 
 QA checkpoint:
 
 - Submit instructions containing project facts and requested actions.
 - Submit feedback containing an explicit preference.
-- Confirm requests without durable facts create no rows.
+- Confirm requests without durable facts store a message and create no queue rows.
 - Confirm indirect or inferred statements are not queued.
-- Confirm both senders are recorded.
+- Force extraction failure and confirm the original message remains stored.
+- Confirm both senders are recorded and every fact links to its original message.
 
 ### Phase 3: Curation and commits
 

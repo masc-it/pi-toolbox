@@ -11,8 +11,23 @@ import {
 import { canonicalizeWorkingDirectory } from "./paths.ts";
 
 const SCHEMA = `
+CREATE TABLE IF NOT EXISTS memory_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    pi_session_id TEXT NOT NULL,
+    cwd TEXT NOT NULL,
+    sent_by TEXT NOT NULL
+        CHECK (sent_by IN ('user', 'agent')),
+    content TEXT NOT NULL,
+    created_at TEXT NOT NULL
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS memory_messages_session_idx
+ON memory_messages (pi_session_id, id);
+
 CREATE TABLE IF NOT EXISTS memory_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
+    message_id INTEGER NOT NULL
+        REFERENCES memory_messages (id),
     pi_session_id TEXT NOT NULL,
     cwd TEXT NOT NULL,
     sent_by TEXT NOT NULL
@@ -30,19 +45,35 @@ WHERE processed_at IS NULL;
 CREATE INDEX IF NOT EXISTS memory_queue_pending_cwd_idx
 ON memory_queue (cwd, id)
 WHERE processed_at IS NULL;
+
+CREATE INDEX IF NOT EXISTS memory_queue_message_idx
+ON memory_queue (message_id, id);
 `;
 
-export interface NewMemoryFact {
+export interface NewMemoryMessage {
 	piSessionId: string;
 	cwd: string;
 	sentBy: MemorySender;
-	topic: MemoryTopic;
-	fact: string;
+	content: string;
 	createdAt: string;
 }
 
-export interface MemoryQueueRow extends NewMemoryFact {
+export interface StoredMemoryMessage extends NewMemoryMessage {
 	id: bigint;
+}
+
+export interface ExtractedMemoryFact {
+	topic: MemoryTopic;
+	fact: string;
+}
+
+export interface MemoryQueueRow extends ExtractedMemoryFact {
+	id: bigint;
+	messageId: bigint;
+	piSessionId: string;
+	cwd: string;
+	sentBy: MemorySender;
+	createdAt: string;
 	processedAt: string | null;
 }
 
@@ -53,6 +84,7 @@ export interface PendingMemoryBatch {
 
 interface DatabaseQueueRow {
 	id: bigint;
+	message_id: bigint;
 	pi_session_id: string;
 	cwd: string;
 	sent_by: string;
@@ -64,7 +96,8 @@ interface DatabaseQueueRow {
 
 export class MemoryQueue {
 	private readonly database: Database.Database;
-	private readonly insertStatement: Database.Statement;
+	private readonly insertMessageStatement: Database.Statement;
+	private readonly insertFactStatement: Database.Statement;
 	private readonly oldestPendingCwdStatement: Database.Statement;
 	private readonly pendingRowsForCwdStatement: Database.Statement;
 	private readonly markProcessedStatement: Database.Statement;
@@ -74,6 +107,7 @@ export class MemoryQueue {
 		const databaseExisted = databaseFileExists(path);
 		this.database = new Database(path);
 		this.database.defaultSafeIntegers(true);
+		this.database.pragma("foreign_keys = ON");
 		this.database.pragma("journal_mode = WAL");
 		this.database.pragma("busy_timeout = 5000");
 		this.database.exec(SCHEMA);
@@ -81,9 +115,13 @@ export class MemoryQueue {
 			chmodSync(path, 0o600);
 		}
 
-		this.insertStatement = this.database.prepare(`
-			INSERT INTO memory_queue (pi_session_id, cwd, sent_by, topic, fact, created_at)
-			VALUES (@piSessionId, @cwd, @sentBy, @topic, @fact, @createdAt)
+		this.insertMessageStatement = this.database.prepare(`
+			INSERT INTO memory_messages (pi_session_id, cwd, sent_by, content, created_at)
+			VALUES (@piSessionId, @cwd, @sentBy, @content, @createdAt)
+		`);
+		this.insertFactStatement = this.database.prepare(`
+			INSERT INTO memory_queue (message_id, pi_session_id, cwd, sent_by, topic, fact, created_at)
+			VALUES (@messageId, @piSessionId, @cwd, @sentBy, @topic, @fact, @createdAt)
 		`);
 		this.oldestPendingCwdStatement = this.database.prepare(`
 			SELECT cwd
@@ -93,7 +131,7 @@ export class MemoryQueue {
 			LIMIT 1
 		`);
 		this.pendingRowsForCwdStatement = this.database.prepare(`
-			SELECT id, pi_session_id, cwd, sent_by, topic, fact, created_at, processed_at
+			SELECT id, message_id, pi_session_id, cwd, sent_by, topic, fact, created_at, processed_at
 			FROM memory_queue
 			WHERE processed_at IS NULL AND cwd = ?
 			ORDER BY id
@@ -106,14 +144,29 @@ export class MemoryQueue {
 		`);
 	}
 
-	enqueue(fact: NewMemoryFact): bigint {
-		return this.enqueueMany([fact])[0]!;
+	storeMessage(message: NewMemoryMessage): StoredMemoryMessage {
+		const validated = validateNewMessage(message);
+		const result = this.insertMessageStatement.run(validated);
+		return { id: result.lastInsertRowid as bigint, ...validated };
 	}
 
-	enqueueMany(facts: readonly NewMemoryFact[]): bigint[] {
-		const validatedFacts = facts.map(validateNewFact);
-		const insertAll = this.database.transaction((rows: readonly NewMemoryFact[]) =>
-			rows.map((row) => this.insertStatement.run(row).lastInsertRowid as bigint),
+	enqueueFacts(message: StoredMemoryMessage, facts: readonly ExtractedMemoryFact[]): bigint[] {
+		if (message.id < 1n) {
+			throw new Error(`Invalid Memory message ID: ${message.id}`);
+		}
+		const validatedFacts = facts.map(validateExtractedFact);
+		const insertAll = this.database.transaction((rows: readonly ExtractedMemoryFact[]) =>
+			rows.map((fact) =>
+				this.insertFactStatement.run({
+					messageId: message.id,
+					piSessionId: message.piSessionId,
+					cwd: message.cwd,
+					sentBy: message.sentBy,
+					topic: fact.topic,
+					fact: fact.fact,
+					createdAt: message.createdAt,
+				}).lastInsertRowid as bigint,
+			),
 		);
 		return insertAll(validatedFacts);
 	}
@@ -162,23 +215,28 @@ export class MemoryQueue {
 	}
 }
 
-function validateNewFact(input: NewMemoryFact): NewMemoryFact {
+function validateNewMessage(input: NewMemoryMessage): NewMemoryMessage {
 	assertNonEmpty(input.piSessionId, "Pi session ID");
 	if (!isMemorySender(input.sentBy)) {
 		throw new Error(`Invalid Memory sender: ${String(input.sentBy)}`);
 	}
-	if (!isMemoryTopic(input.topic)) {
-		throw new Error(`Invalid Memory topic: ${String(input.topic)}`);
-	}
-	assertNonEmpty(input.fact, "Fact");
+	assertNonEmpty(input.content, "Message content");
 	assertIsoUtcTimestamp(input.createdAt, "Creation timestamp");
 
 	return {
 		...input,
 		piSessionId: input.piSessionId.trim(),
 		cwd: canonicalizeWorkingDirectory(input.cwd),
-		fact: input.fact.trim(),
+		content: input.content,
 	};
+}
+
+function validateExtractedFact(input: ExtractedMemoryFact): ExtractedMemoryFact {
+	if (!isMemoryTopic(input.topic)) {
+		throw new Error(`Invalid Memory topic: ${String(input.topic)}`);
+	}
+	assertNonEmpty(input.fact, "Fact");
+	return { topic: input.topic, fact: input.fact.trim() };
 }
 
 function toQueueRow(row: DatabaseQueueRow): MemoryQueueRow {
@@ -195,6 +253,7 @@ function toQueueRow(row: DatabaseQueueRow): MemoryQueueRow {
 
 	return {
 		id: row.id,
+		messageId: row.message_id,
 		piSessionId: row.pi_session_id,
 		cwd: row.cwd,
 		sentBy: row.sent_by,
