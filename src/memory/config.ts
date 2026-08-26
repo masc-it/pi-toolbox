@@ -9,6 +9,7 @@ export const MEMORY_SENDERS = ["user", "agent"] as const;
 export type MemorySender = (typeof MEMORY_SENDERS)[number];
 
 export const MEMORY_BATCH_MAX_FACTS = 10;
+export const MEMORY_BATCH_MAX_BYTES = 32 * 1024;
 
 export interface MemoryConfig {
 	dataDirectory: string;

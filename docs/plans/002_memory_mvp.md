@@ -1,6 +1,6 @@
 # Memory MVP
 
-Status: draft  
+Status: done
 Created: 2026-08-26
 
 ## Goal
@@ -334,17 +334,17 @@ QA checkpoint:
 
 ### Phase 3: Curation and commits
 
-Status: todo
+Status: done
 
 Consume `cwd` batches through the curator and update the knowledge base safely.
 
 Tasks:
 
-- Status: todo - Add the single-flight consumer and cross-process lock.
-- Status: todo - Build bounded batches for one canonical `cwd`.
-- Status: todo - Run the isolated curator with medium thinking and Memory disabled.
-- Status: todo - Validate changes and commit only when required.
-- Status: todo - Set `processed_at` after commit or no-op.
+- Status: done - Add the single-flight consumer and cross-process lock.
+- Status: done - Build bounded batches for one canonical `cwd`.
+- Status: done - Run the isolated curator with medium thinking and Memory disabled.
+- Status: done - Validate changes and commit only when required.
+- Status: done - Set `processed_at` after commit or no-op.
 
 QA checkpoint:
 

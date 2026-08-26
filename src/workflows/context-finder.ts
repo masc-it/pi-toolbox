@@ -1,8 +1,8 @@
 import { spawn } from "node:child_process";
-import { existsSync } from "node:fs";
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { basename, join } from "node:path";
+import { join } from "node:path";
+import { getPiInvocation } from "../pi/invocation.ts";
 
 export const CONTEXT_FINDER_MODEL = "openai-codex/gpt-5.6-luna";
 export const CONTEXT_FINDER_THINKING_LEVEL = "medium";
@@ -196,20 +196,6 @@ async function runContextAgent(
 			signal.addEventListener("abort", abortChild, { once: true });
 		}
 	});
-}
-
-function getPiInvocation(args: string[]): { command: string; args: string[] } {
-	const currentScript = process.argv[1];
-	const isBunVirtualScript = currentScript?.startsWith("/$bunfs/root/");
-	if (currentScript && !isBunVirtualScript && existsSync(currentScript)) {
-		return { command: process.execPath, args: [currentScript, ...args] };
-	}
-
-	const executable = basename(process.execPath).toLowerCase();
-	if (!/^(node|bun)(\.exe)?$/.test(executable)) {
-		return { command: process.execPath, args };
-	}
-	return { command: "pi", args };
 }
 
 function normalizeReferenceList(output: string): string {
