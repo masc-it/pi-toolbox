@@ -1,7 +1,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
-import { isMemoryTopic } from "./config.ts";
+import { isMemoryTopic, MEMORY_TOPICS } from "./config.ts";
 import { validateOkfDocument } from "./okf.ts";
 import { canonicalizeKnowledgeBaseDirectory } from "./paths.ts";
 
@@ -11,6 +11,12 @@ export class MemoryRepository {
 	private baseline: Map<string, Buffer> | null = null;
 
 	constructor(path: string) {
+		if (path.trim().length === 0) {
+			throw new Error("Knowledge-base directory must not be empty");
+		}
+		if (!existsSync(path)) {
+			initializeMemoryRepository(path);
+		}
 		this.path = canonicalizeKnowledgeBaseDirectory(path);
 		runGit(this.path, ["rev-parse", "--git-dir"]);
 		this.hasHead = gitSucceeds(this.path, ["rev-parse", "--verify", "HEAD"]);
@@ -97,6 +103,15 @@ function validateRelativeDocumentPath(path: string): void {
 	}
 	if (!isMemoryTopic(parts[0])) {
 		throw new Error(`Knowledge-base document uses an invalid topic: ${path}`);
+	}
+}
+
+function initializeMemoryRepository(path: string): void {
+	mkdirSync(path, { recursive: true, mode: 0o700 });
+	runGit(path, ["init"]);
+	writeFileSync(join(path, "index.md"), "# Knowledge base\n", { encoding: "utf8", mode: 0o600 });
+	for (const topic of MEMORY_TOPICS) {
+		mkdirSync(join(path, topic));
 	}
 }
 

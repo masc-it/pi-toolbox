@@ -1,6 +1,7 @@
+import { readdirSync } from "node:fs";
 import type { WorkflowModelProfile } from "../domain.ts";
 import type { WorkflowModelClient } from "../model/client.ts";
-import { isMemoryTopic, type MemorySender, type MemoryTopic } from "./config.ts";
+import { isMemoryTopic, MEMORY_TOPICS, type MemorySender, type MemoryTopic } from "./config.ts";
 
 export const MEMORY_EXTRACTOR_PROFILE: WorkflowModelProfile = {
 	provider: "openai-codex",
@@ -8,18 +9,24 @@ export const MEMORY_EXTRACTOR_PROFILE: WorkflowModelProfile = {
 	thinkingLevel: "off",
 };
 
-const EXTRACTOR_SYSTEM_PROMPT = `You extract durable facts from a conversation message, sent either by the user or a coding agent.
+function buildExtractorSystemPrompt(memoryTopics: readonly string[]): string {
+	return `You extract durable facts from a conversation message, sent either by the user or a coding agent.
 
 Rules:
 - Extract only facts stated directly in the event.
 - Ignore requests and actions unless they also state a fact.
 - Write each fact as one clear, self-contained sentence, using simplified english.
-- Assign exactly one topic: coding, docs-style, personal-principles, projects, or team.
+- Assign each fact exactly one available topic when applicable.
+- If no topic applies, propose a concise lowercase kebab-case topic.
 - Use the working directory only to name a project mentioned in the event. Never extract the directory itself as a fact.
 - Return JSON only. Return an empty facts list when there are no facts.
 
-Output:
+Available topics:
+${JSON.stringify(memoryTopics)}
+
+Output example:
 {"facts":[{"topic":"projects","fact":"Uses TypeScript."}]}`;
+}
 
 export interface ExtractedMemoryFact {
 	topic: MemoryTopic;
@@ -33,19 +40,30 @@ export interface MemoryExtractionEvent {
 }
 
 type ExtractorModelClient = Pick<WorkflowModelClient, "completeText">;
+type MemoryTopicProvider = () => string[];
 
 export class MemoryExtractor {
-	constructor(private readonly modelClient: ExtractorModelClient) {}
+	constructor(
+		private readonly modelClient: ExtractorModelClient,
+		private readonly getMemoryTopics: MemoryTopicProvider = () => [...MEMORY_TOPICS],
+	) {}
 
 	async extract(event: MemoryExtractionEvent, signal: AbortSignal): Promise<ExtractedMemoryFact[]> {
 		const output = await this.modelClient.completeText({
 			profile: MEMORY_EXTRACTOR_PROFILE,
-			systemPrompt: EXTRACTOR_SYSTEM_PROMPT,
+			systemPrompt: buildExtractorSystemPrompt(this.getMemoryTopics()),
 			prompt: buildExtractorEventPrompt(event),
 			signal,
 		});
 		return parseExtractorOutput(output);
 	}
+}
+
+export function listMemoryTopics(knowledgeBaseDirectory: string): string[] {
+	return readdirSync(knowledgeBaseDirectory, { withFileTypes: true })
+		.filter((entry) => entry.isDirectory() && isMemoryTopic(entry.name))
+		.map((entry) => entry.name)
+		.sort();
 }
 
 export function buildExtractorEventPrompt(event: MemoryExtractionEvent): string {

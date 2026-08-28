@@ -7,18 +7,22 @@ export const MEMORY_CURATOR_MODEL = "openai-codex/gpt-5.6-luna";
 export const MEMORY_CURATOR_THINKING_LEVEL = "medium";
 
 const CURATOR_TOOLS = "read,write,edit,find,ls";
-const CURATOR_PROMPT = `You maintain the knowledge base in the current directory.
-
-The input facts belong to one project and are ordered from oldest to newest.
+const CURATOR_SYSTEM_PROMPT = `You curate the knowledge base in the current directory from an ordered batch of facts about one project.
 
 For each fact:
 - Add it when it is new.
-- Do nothing when it is already current.
-- Replace older knowledge when it contradicts a newer fact.
-- Keep unrelated current knowledge.
-- Put it in its assigned topic and the clearest concept document.
+- Ignore it when it is already current.
+- Replace older knowledge when a newer fact contradicts it.
+- Preserve unrelated current knowledge.
+- Store it under its assigned topic in the clearest concept document.
 
-Read the relevant concepts, then use edit to update each complete target document, including its frontmatter when needed. Use write for new concepts. Keep frontmatter valid YAML and quote string values that contain whitespace. Update index.md when concepts change.`;
+Available tools:
+- Use find and ls to locate relevant concepts.
+- Use read to inspect concepts and index.md.
+- Use edit to update existing complete documents, including frontmatter when needed.
+- Use write only to create new concept documents.
+
+Keep frontmatter valid YAML and quote string values that contain whitespace. Update index.md when concepts change. Make no changes when the knowledge base is already current.`;
 
 export interface CuratorBatch {
 	cwd: string;
@@ -31,16 +35,10 @@ export class MemoryCurator {
 	constructor(private readonly resolveInvocation: PiInvocationResolver = getPiInvocation) {}
 
 	curate(batch: CuratorBatch, knowledgeBaseDirectory: string, signal: AbortSignal): Promise<void> {
-		const prompt = `${CURATOR_PROMPT}
-
-Project working directory: ${batch.cwd}
-
-Facts:
-${JSON.stringify(
-	batch.rows.map((row) => ({ topic: row.topic, fact: row.fact })),
-	null,
-	2,
-)}`;
+		const input = JSON.stringify({
+			projectWorkingDirectory: batch.cwd,
+			facts: batch.rows.map((row) => ({ topic: row.topic, fact: row.fact })),
+		});
 		const args = [
 			"--mode",
 			"json",
@@ -48,13 +46,18 @@ ${JSON.stringify(
 			"--no-session",
 			"--no-approve",
 			"--no-extensions",
+			"--no-skills",
+			"--no-prompt-templates",
+			"--no-context-files",
+			"--system-prompt",
+			CURATOR_SYSTEM_PROMPT,
 			"--model",
 			MEMORY_CURATOR_MODEL,
 			"--thinking",
 			MEMORY_CURATOR_THINKING_LEVEL,
 			"--tools",
 			CURATOR_TOOLS,
-			prompt,
+			input,
 		];
 		const invocation = this.resolveInvocation(args);
 

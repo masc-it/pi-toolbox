@@ -7,13 +7,13 @@ Created: 2026-08-26
 
 Memory keeps a current knowledge base about the user and their work. It runs in the background during normal Pi conversations. The user does not need to call a tool or open a Toolbox screen.
 
-The knowledge base lives at `~/work-memory`. It is a Git repository that follows Open Knowledge Format (OKF) v0.2.
+The knowledge base lives at `~/work-memory`. It is a Git repository that follows Open Knowledge Format (OKF) v0.2. Memory initializes the repository, root index, and topic directories when the path does not exist.
 
 Memory stores only explicit facts extracted from user or agent messages.
 
 ## Knowledge base
 
-The existing directories define the first topic set:
+The initial directories define the first topics:
 
 - `coding`
 - `docs-style`
@@ -21,8 +21,7 @@ The existing directories define the first topic set:
 - `projects`
 - `team`
 
-Each knowledge concept is a Markdown file with YAML frontmatter.
-
+Each knowledge concept is a Markdown file with YAML frontmatter. The extractor receives the current top-level directories as topics and may propose a new lowercase kebab-case topic when none applies.
 
 The knowledge base represents the latest known state:
 
@@ -142,7 +141,7 @@ Thinking effort: `none` (`off` in the current Pi API).
 The extractor receives one stored message and returns a validated list of facts. For each fact it:
 
 1. Checks that the statement is explicit.
-2. Assigns one topic.
+2. Assigns an existing topic or proposes a new one.
 3. Writes one queue row linked to the original message, with the Pi session, working directory, sender, and creation time.
 
 An event with no durable facts produces no queue rows. Its original message remains stored.
@@ -158,9 +157,13 @@ Rules:
 - Extract only facts stated directly in the event.
 - Ignore requests and actions unless they also state a fact.
 - Write each fact as one clear, self-contained sentence, using simplified english.
-- Assign exactly one topic: coding, docs-style, personal-principles, projects, or team.
+- Assign each fact exactly one available topic when applicable.
+- If no topic applies, propose a concise lowercase kebab-case topic.
 - Use the working directory only to name a project mentioned in the event. Never extract the directory itself as a fact.
 - Return JSON only. Return an empty facts list when there are no facts.
+
+Available topics:
+{{memory_topics}}
 
 Output:
 {"facts":[{"topic":"projects","fact":"Uses TypeScript."}]}
@@ -182,27 +185,28 @@ The curator runs in an isolated Pi process with extension discovery disabled. Th
 
 The curator edits complete concept documents and the root index directly. The surrounding application validates and commits the changes.
 
-#### Curator prompt
+#### Curator system prompt
 
 ```text
-You maintain the knowledge base in the current directory.
-
-The input facts belong to one project and are ordered from oldest to newest.
+You curate the knowledge base in the current directory from an ordered batch of facts about one project.
 
 For each fact:
 - Add it when it is new.
-- Do nothing when it is already current.
-- Replace older knowledge when it contradicts a newer fact.
-- Keep unrelated current knowledge.
-- Put it in its assigned topic and the clearest concept file.
+- Ignore it when it is already current.
+- Replace older knowledge when a newer fact contradicts it.
+- Preserve unrelated current knowledge.
+- Store it under its assigned topic in the clearest concept document.
 
-Read the relevant concepts, then use edit to update each complete target document, including its frontmatter when needed. Use write for new concepts. Keep frontmatter valid YAML and quote string values that contain whitespace. Update index.md when concepts change.
+Available tools:
+- Use find and ls to locate relevant concepts.
+- Use read to inspect concepts and index.md.
+- Use edit to update existing complete documents, including frontmatter when needed.
+- Use write only to create new concept documents.
 
-Project working directory: {{cwd}}
-
-Facts:
-{{facts}}
+Keep frontmatter valid YAML and quote string values that contain whitespace. Update index.md when concepts change. Make no changes when the knowledge base is already current.
 ```
+
+The initial user message contains only the JSON batch payload: `projectWorkingDirectory` and ordered `facts`.
 
 ## Event flow
 
@@ -272,7 +276,7 @@ Boundary validation is strict:
 
 - **Automatic capture:** Memory stores user submissions and completed agent runs, then extracts from them in the background.
 - **Inspectable inputs:** Original messages are retained indefinitely and linked to their extracted facts.
-- **Explicit knowledge:** It stores direct facts under the five initial topics and rejects inference.
+- **Explicit knowledge:** It stores direct facts under injected topics, allows new topics when needed, and rejects inference.
 - **Current-state curation:** New facts update OKF concepts, duplicates are ignored, and newer contradictions replace older values.
 - **Project-aware processing:** Facts are queued durably and curated in serialized batches for one working directory.
 - **Recoverable operation:** Successful file changes are committed to Git.

@@ -1,7 +1,7 @@
 import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { WorkflowModelClient } from "../model/client.ts";
 import { createMemoryConfig, type MemorySender, type MemoryTopic } from "./config.ts";
-import { MemoryExtractor } from "./extractor.ts";
+import { listMemoryTopics, MemoryExtractor } from "./extractor.ts";
 import { recordMemoryError, type MemoryErrorWriter } from "./log.ts";
 import {
 	MemoryQueue,
@@ -92,7 +92,10 @@ export function registerMemoryCapture(pi: ExtensionAPI): void {
 		let queue: MemoryQueue | undefined;
 		try {
 			queue = new MemoryQueue(config.databasePath);
-			const extractor = new MemoryExtractor(new WorkflowModelClient(ctx.modelRegistry));
+			const extractor = new MemoryExtractor(
+				new WorkflowModelClient(ctx.modelRegistry),
+				() => listMemoryTopics(config.knowledgeBaseDirectory),
+			);
 			runtime = new MemoryCaptureRuntime(
 				extractor,
 				queue,

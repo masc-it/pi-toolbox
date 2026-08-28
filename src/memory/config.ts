@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
 export const MEMORY_TOPICS = ["coding", "docs-style", "personal-principles", "projects", "team"] as const;
-export type MemoryTopic = (typeof MEMORY_TOPICS)[number];
+export type MemoryTopic = string;
 
 export const MEMORY_SENDERS = ["user", "agent"] as const;
 export type MemorySender = (typeof MEMORY_SENDERS)[number];
@@ -30,7 +30,7 @@ export function createMemoryConfig(
 }
 
 export function isMemoryTopic(value: unknown): value is MemoryTopic {
-	return typeof value === "string" && MEMORY_TOPICS.some((topic) => topic === value);
+	return typeof value === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
 }
 
 export function isMemorySender(value: unknown): value is MemorySender {
