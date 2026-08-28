@@ -7,7 +7,7 @@ const MAX_OUTPUT_BYTES = 50 * 1024;
 const KILL_DELAY_MS = 5_000;
 const ANALYZER_PATH = fileURLToPath(new URL("../../scripts/python_complexity.py", import.meta.url));
 const PROMPT_PREFIX =
-	"Propose how to reduce the code complexity in the highest-offending Python file shown below. Focus on the biggest offenders and follow our coding principles.\n\n";
+	"Propose how to reduce the code complexity in the highest-offending Python file shown below. Remind of our coding principles.\n\n";
 
 export interface ComplexityResult {
 	report: string;
