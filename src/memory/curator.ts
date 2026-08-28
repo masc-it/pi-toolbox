@@ -16,18 +16,9 @@ For each fact:
 - Do nothing when it is already current.
 - Replace older knowledge when it contradicts a newer fact.
 - Keep unrelated current knowledge.
-- Put it in its assigned topic and the clearest concept file.
+- Put it in its assigned topic and the clearest concept document.
 
-Keep the Markdown simple. Update index.md when concepts change.
-
-Use this frontmatter shape:
-
----
-type: <concept type>
-title: <display name>
-description: <one-line summary>
-tags: [<topic>, <other topics>, ..]
----`;
+Read the relevant concepts, then use edit to update each complete target document, including its frontmatter when needed. Use write for new concepts. Keep frontmatter valid YAML and quote string values that contain whitespace. Update index.md when concepts change.`;
 
 export interface CuratorBatch {
 	cwd: string;

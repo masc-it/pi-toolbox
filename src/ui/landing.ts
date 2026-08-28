@@ -20,6 +20,11 @@ const ITEMS: readonly LandingItem[] = [
 		description: "Find relevant project files and symbols, then append them to the current prompt.",
 		view: "context-finder",
 	},
+	{
+		label: "Code Complexity",
+		description: "Find the worst Python complexity offender and propose focused improvements.",
+		view: "complexity",
+	},
 ];
 
 export class LandingScreen implements ToolboxScreen {

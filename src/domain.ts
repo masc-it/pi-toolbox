@@ -12,7 +12,7 @@ export interface ToolboxConfig {
 	};
 }
 
-export type ToolboxView = "landing" | "polish" | "context-finder";
+export type ToolboxView = "landing" | "polish" | "context-finder" | "complexity";
 
 export const THINKING_LEVELS: readonly ModelThinkingLevel[] = [
 	"off",

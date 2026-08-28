@@ -3,10 +3,11 @@ import { createMemoryConfig, MEMORY_BATCH_MAX_BYTES } from "./config.ts";
 import { MEMORY_QUEUE_WAKE_EVENT } from "./capture.ts";
 import { MemoryCurator, type CuratorBatch } from "./curator.ts";
 import { acquireMemoryLock } from "./lock.ts";
+import { recordMemoryError, type MemoryErrorWriter } from "./log.ts";
 import { MemoryQueue, type PendingMemoryBatch } from "./queue.ts";
 import { MemoryRepository } from "./repository.ts";
 
-interface ConsumerQueue {
+interface ConsumerQueue extends MemoryErrorWriter {
 	nextPendingBatch(): PendingMemoryBatch | null;
 	markProcessed(ids: readonly bigint[], processedAt: string): void;
 	close(): void;
@@ -82,7 +83,7 @@ export class MemoryConsumer {
 				return;
 			}
 			this.failed = true;
-			logConsumerFailure(error);
+			logConsumerFailure(this.queue, error);
 		}
 	}
 
@@ -163,9 +164,10 @@ export function registerMemoryConsumer(pi: ExtensionAPI): void {
 	let unsubscribeWake: (() => void) | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
+		const config = createMemoryConfig();
+		let queue: MemoryQueue | undefined;
 		try {
-			const config = createMemoryConfig();
-			const queue = new MemoryQueue(config.databasePath);
+			queue = new MemoryQueue(config.databasePath);
 			const repository = new MemoryRepository(config.knowledgeBaseDirectory);
 			consumer = new MemoryConsumer(
 				queue,
@@ -176,15 +178,19 @@ export function registerMemoryConsumer(pi: ExtensionAPI): void {
 			unsubscribeWake = pi.events.on(MEMORY_QUEUE_WAKE_EVENT, () => consumer?.wake());
 			consumer.wake();
 		} catch (error) {
-			console.error(
-				JSON.stringify({
+			unsubscribeWake?.();
+			unsubscribeWake = undefined;
+			consumer = undefined;
+			if (queue) {
+				recordMemoryError(queue, {
 					component: "memory",
 					stage: "consumer-start",
 					pi_session_id: ctx.sessionManager.getSessionId(),
 					cwd: ctx.cwd,
 					error: error instanceof Error ? error.message : String(error),
-				}),
-			);
+				});
+				queue.close();
+			}
 		}
 	});
 
@@ -207,27 +213,23 @@ class MemoryConsumerFailure extends Error {
 	}
 }
 
-function logConsumerFailure(error: unknown): void {
+function logConsumerFailure(writer: MemoryErrorWriter, error: unknown): void {
 	if (error instanceof MemoryConsumerFailure) {
-		console.error(
-			JSON.stringify({
-				component: "memory",
-				stage: error.stage,
-				pi_session_id: error.batch.rows[0]?.piSessionId,
-				cwd: error.batch.cwd,
-				queue_row_ids: error.batch.rows.map((row) => row.id.toString()),
-				error: formatError(error.cause),
-			}),
-		);
+		recordMemoryError(writer, {
+			component: "memory",
+			stage: error.stage,
+			pi_session_id: error.batch.rows[0]?.piSessionId,
+			cwd: error.batch.cwd,
+			queue_row_ids: error.batch.rows.map((row) => row.id.toString()),
+			error: formatError(error.cause),
+		});
 		return;
 	}
-	console.error(
-		JSON.stringify({
-			component: "memory",
-			stage: "consumer",
-			error: formatError(error),
-		}),
-	);
+	recordMemoryError(writer, {
+		component: "memory",
+		stage: "consumer",
+		error: formatError(error),
+	});
 }
 
 function formatError(error: unknown): string {

@@ -24,6 +24,12 @@ CREATE TABLE IF NOT EXISTS memory_messages (
 CREATE INDEX IF NOT EXISTS memory_messages_session_idx
 ON memory_messages (pi_session_id, id);
 
+CREATE TABLE IF NOT EXISTS logs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    msg TEXT NOT NULL,
+    created_at TEXT NOT NULL
+) STRICT;
+
 CREATE TABLE IF NOT EXISTS memory_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     message_id INTEGER NOT NULL
@@ -98,6 +104,7 @@ export class MemoryQueue {
 	private readonly database: Database.Database;
 	private readonly insertMessageStatement: Database.Statement;
 	private readonly insertFactStatement: Database.Statement;
+	private readonly insertLogStatement: Database.Statement;
 	private readonly oldestPendingCwdStatement: Database.Statement;
 	private readonly pendingRowsForCwdStatement: Database.Statement;
 	private readonly markProcessedStatement: Database.Statement;
@@ -122,6 +129,10 @@ export class MemoryQueue {
 		this.insertFactStatement = this.database.prepare(`
 			INSERT INTO memory_queue (message_id, pi_session_id, cwd, sent_by, topic, fact, created_at)
 			VALUES (@messageId, @piSessionId, @cwd, @sentBy, @topic, @fact, @createdAt)
+		`);
+		this.insertLogStatement = this.database.prepare(`
+			INSERT INTO logs (msg, created_at)
+			VALUES (?, ?)
 		`);
 		this.oldestPendingCwdStatement = this.database.prepare(`
 			SELECT cwd
@@ -169,6 +180,12 @@ export class MemoryQueue {
 			),
 		);
 		return insertAll(validatedFacts);
+	}
+
+	logError(msg: string, createdAt: string): void {
+		assertNonEmpty(msg, "Log message");
+		assertIsoUtcTimestamp(createdAt, "Log creation timestamp");
+		this.insertLogStatement.run(msg, createdAt);
 	}
 
 	nextPendingBatch(maxRows = MEMORY_BATCH_MAX_FACTS): PendingMemoryBatch | null {

@@ -180,7 +180,7 @@ The curator receives a batch from one `cwd`. It works from `~/work-memory`, read
 
 The curator runs in an isolated Pi process with extension discovery disabled. This prevents its own prompt and agent turn from triggering Memory again.
 
-The curator edits files, but the surrounding application owns validation, queue completion, and Git commits.
+The curator edits complete concept documents and the root index directly. The surrounding application validates and commits the changes.
 
 #### Curator prompt
 
@@ -196,16 +196,7 @@ For each fact:
 - Keep unrelated current knowledge.
 - Put it in its assigned topic and the clearest concept file.
 
-Keep the Markdown simple. Update index.md when concepts change.
-
-Use this frontmatter shape:
-
----
-type: <concept type>
-title: <display name>
-description: <one-line summary>
-tags: [<topic>, <other topics>, ..]
----
+Read the relevant concepts, then use edit to update each complete target document, including its frontmatter when needed. Use write for new concepts. Keep frontmatter valid YAML and quote string values that contain whitespace. Update index.md when concepts change.
 
 Project working directory: {{cwd}}
 
@@ -267,7 +258,7 @@ A retry is idempotent. If files already contain the facts, the curator performs 
 
 ## Failure handling
 
-Memory failures do not fail the user's main agent turn. They are logged with the Pi session ID, `cwd`, message ID, queue row IDs, stage, and error. A stored original message remains available when extraction fails.
+Memory failures do not fail the user's main agent turn. Errors are stored in the SQLite `logs` table with `id`, `msg`, and `created_at`; contextual fields are serialized in `msg`. A stored original message remains available when extraction fails.
 
 Boundary validation is strict:
 

@@ -12,6 +12,7 @@ const COMMANDS: readonly ToolboxCommand[] = [
 	{ name: "toolbox", description: "Open Pi Toolbox", view: "landing" },
 	{ name: "tb-polish", description: "Open Prompt Polish", view: "polish" },
 	{ name: "tb-context", description: "Open Context Finder", view: "context-finder" },
+	{ name: "tb-complexity", description: "Open Code Complexity", view: "complexity" },
 ];
 
 export function registerToolboxCommands(pi: ExtensionAPI, controller: ToolboxOverlayController): void {

@@ -2,6 +2,7 @@ import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agen
 import { WorkflowModelClient } from "../model/client.ts";
 import { createMemoryConfig, type MemorySender, type MemoryTopic } from "./config.ts";
 import { MemoryExtractor } from "./extractor.ts";
+import { recordMemoryError, type MemoryErrorWriter } from "./log.ts";
 import {
 	MemoryQueue,
 	type ExtractedMemoryFact,
@@ -17,7 +18,7 @@ interface MemoryFactExtractor {
 	>;
 }
 
-interface MemoryQueueWriter {
+interface MemoryQueueWriter extends MemoryErrorWriter {
 	storeMessage(message: NewMemoryMessage): StoredMemoryMessage;
 	enqueueFacts(message: StoredMemoryMessage, facts: readonly ExtractedMemoryFact[]): bigint[];
 	close(): void;
@@ -43,12 +44,12 @@ export class MemoryCaptureRuntime {
 		try {
 			message = this.queue.storeMessage(event);
 		} catch (error) {
-			logMemoryFailure(event, "store-message", error);
+			logMemoryFailure(this.queue, event, "store-message", error);
 			return;
 		}
 
 		const task = this.extractAndQueue(message).catch((error: unknown) => {
-			logMemoryFailure(message, "capture", error, message.id);
+			logMemoryFailure(this.queue, message, "capture", error, message.id);
 		});
 		this.tasks.add(task);
 		void task.finally(() => this.tasks.delete(task));
@@ -66,7 +67,7 @@ export class MemoryCaptureRuntime {
 		try {
 			facts = await this.extractor.extract(message, this.abortController.signal);
 		} catch (error) {
-			logMemoryFailure(message, "extract", error, message.id);
+			logMemoryFailure(this.queue, message, "extract", error, message.id);
 			return;
 		}
 		if (facts.length === 0) {
@@ -76,7 +77,7 @@ export class MemoryCaptureRuntime {
 		try {
 			this.queue.enqueueFacts(message, facts);
 		} catch (error) {
-			logMemoryFailure(message, "queue-facts", error, message.id);
+			logMemoryFailure(this.queue, message, "queue-facts", error, message.id);
 			return;
 		}
 		this.wakeConsumer();
@@ -87,20 +88,28 @@ export function registerMemoryCapture(pi: ExtensionAPI): void {
 	let runtime: MemoryCaptureRuntime | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
+		const config = createMemoryConfig();
+		let queue: MemoryQueue | undefined;
 		try {
-			const config = createMemoryConfig();
-			const queue = new MemoryQueue(config.databasePath);
+			queue = new MemoryQueue(config.databasePath);
 			const extractor = new MemoryExtractor(new WorkflowModelClient(ctx.modelRegistry));
-			runtime = new MemoryCaptureRuntime(extractor, queue, () => {
-				pi.events.emit(MEMORY_QUEUE_WAKE_EVENT, undefined);
-			});
+			runtime = new MemoryCaptureRuntime(
+				extractor,
+				queue,
+				() => pi.events.emit(MEMORY_QUEUE_WAKE_EVENT, undefined),
+			);
 			pi.events.emit(MEMORY_QUEUE_WAKE_EVENT, undefined);
 		} catch (error) {
-			logMemoryFailure(
-				createCapturedMessage(ctx.sessionManager.getSessionId(), ctx.cwd, "agent", "Memory startup"),
-				"start",
-				error,
-			);
+			runtime = undefined;
+			if (queue) {
+				logMemoryFailure(
+					queue,
+					createCapturedMessage(ctx.sessionManager.getSessionId(), ctx.cwd, "agent", "Memory startup"),
+					"start",
+					error,
+				);
+				queue.close();
+			}
 		}
 	});
 
@@ -153,20 +162,19 @@ function createCapturedMessage(
 }
 
 function logMemoryFailure(
+	writer: MemoryErrorWriter,
 	message: NewMemoryMessage,
 	stage: "start" | "store-message" | "extract" | "queue-facts" | "capture",
 	error: unknown,
 	messageId?: bigint,
 ): void {
-	console.error(
-		JSON.stringify({
-			component: "memory",
-			stage,
-			pi_session_id: message.piSessionId,
-			cwd: message.cwd,
-			sent_by: message.sentBy,
-			...(messageId === undefined ? {} : { message_id: messageId.toString() }),
-			error: error instanceof Error ? error.message : String(error),
-		}),
-	);
+	recordMemoryError(writer, {
+		component: "memory",
+		stage,
+		pi_session_id: message.piSessionId,
+		cwd: message.cwd,
+		sent_by: message.sentBy,
+		...(messageId === undefined ? {} : { message_id: messageId.toString() }),
+		error: error instanceof Error ? error.message : String(error),
+	});
 }
