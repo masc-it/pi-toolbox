@@ -250,7 +250,7 @@ Queue consumer
   -> set processed_at
 ```
 
-The local message insert completes before the `message_end` hook returns. Extraction runs in the background after settlement without delaying the main coding agent. A session start retries settled, unextracted exchanges and wakes the curator consumer. Session shutdown settles any remaining open exchange from the messages available at that point.
+The local message insert completes in the Memory worker before the `message_end` hook returns. Extraction runs in the background after settlement without delaying the main coding agent. SQLite, Git, lock, and knowledge-base filesystem operations stay in the worker so synchronous library calls cannot block Pi's TUI event loop. A session start retries settled, unextracted exchanges and wakes the curator consumer. Session shutdown settles any remaining open exchange, aborts extraction, drains the worker, and then closes its database connection.
 
 ## Batch consumption
 
@@ -373,3 +373,23 @@ QA checkpoint:
 - Confirm duplicates produce no commit.
 - Start two Pi processes and confirm only one curator changes the KB at a time.
 - Force curator, validation, and Git failures and confirm rows remain pending.
+
+### Phase 4: Main-thread isolation
+
+Status: done
+
+Move synchronous Memory infrastructure outside Pi's TUI event loop while preserving durable event capture.
+
+Tasks:
+
+- Status: done - Give one dedicated worker ownership of SQLite capture and queue consumption.
+- Status: done - Run repository initialization, filesystem validation, locking, and synchronous Git commands in the worker.
+- Status: done - Await worker persistence from capture hooks while keeping extraction and curation in the background.
+- Status: done - Abort extraction before waiting during shutdown and close the worker gracefully.
+
+QA checkpoint:
+
+- Start Pi without an existing database or knowledge-base repository and confirm the TUI remains responsive.
+- Capture messages while the consumer is curating and confirm worker acknowledgements preserve exchange order.
+- Hold SQLite contention and confirm Pi input and rendering continue while the worker waits.
+- Reload or exit during extraction and curation and confirm shutdown cancels background work and releases the lock.

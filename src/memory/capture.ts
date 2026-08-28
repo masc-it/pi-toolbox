@@ -1,17 +1,14 @@
 import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { WorkflowModelClient } from "../model/client.ts";
 import { createMemoryConfig } from "./config.ts";
-import { listMemoryTopics, MemoryExtractor, toExtractionExchange } from "./extractor.ts";
-import { recordMemoryError, type MemoryErrorWriter } from "./log.ts";
-import {
-	MemoryQueue,
-	type ExtractableMemoryExchange,
-	type ExtractedMemoryFact,
-	type NewMemoryExchange,
-	type OpenMemoryExchange,
+import { MemoryExtractor, toExtractionExchange } from "./extractor.ts";
+import type {
+	ExtractableMemoryExchange,
+	ExtractedMemoryFact,
+	NewMemoryExchange,
+	OpenMemoryExchange,
 } from "./queue.ts";
-
-export const MEMORY_QUEUE_WAKE_EVENT = "pi-toolbox:memory-queue-wake";
+import { MemoryWorkerClient } from "./worker-client.ts";
 
 interface CapturedUserMessage extends NewMemoryExchange {
 	content: string;
@@ -21,17 +18,18 @@ interface MemoryFactExtractor {
 	extract(exchange: ReturnType<typeof toExtractionExchange>, signal: AbortSignal): Promise<ExtractedMemoryFact[]>;
 }
 
-interface MemoryExchangeStore extends MemoryErrorWriter {
-	startExchange(exchange: NewMemoryExchange, userContent: string): OpenMemoryExchange;
-	appendMessage(exchangeId: bigint, sentBy: "user" | "agent", content: string, createdAt: string): unknown;
-	settleExchange(exchangeId: bigint, settledAt: string): void;
-	nextUnextractedExchange(): ExtractableMemoryExchange | null;
+interface MemoryExchangeStore {
+	startExchange(exchange: NewMemoryExchange, userContent: string): Promise<OpenMemoryExchange>;
+	appendMessage(exchangeId: bigint, sentBy: "user" | "agent", content: string, createdAt: string): Promise<void>;
+	settleExchange(exchangeId: bigint, settledAt: string): Promise<void>;
+	nextUnextractedExchange(): Promise<ExtractableMemoryExchange | null>;
 	completeExtraction(
 		exchange: ExtractableMemoryExchange,
 		facts: readonly ExtractedMemoryFact[],
 		extractedAt: string,
-	): bigint[];
-	close(): void;
+	): Promise<bigint[]>;
+	logError(entry: Record<string, unknown>): Promise<void>;
+	close(): Promise<void>;
 }
 
 export class MemoryCaptureRuntime {
@@ -44,52 +42,48 @@ export class MemoryCaptureRuntime {
 
 	constructor(
 		private readonly extractor: MemoryFactExtractor,
-		private readonly queue: MemoryExchangeStore,
-		private readonly wakeConsumer: () => void,
+		private readonly store: MemoryExchangeStore,
 	) {}
 
-	captureUserMessage(message: CapturedUserMessage): void {
+	async captureUserMessage(message: CapturedUserMessage): Promise<void> {
 		if (!this.accepting) {
-			throw new Error("Memory capture runtime is closed");
-		}
-
-		try {
-			if (!this.activeExchange) {
-				this.activeExchange = this.queue.startExchange(message, message.content);
-				return;
-			}
-			this.queue.appendMessage(this.activeExchange.id, "user", message.content, message.startedAt);
-		} catch (error) {
-			logCaptureFailure(this.queue, "capture-user", message, error, this.activeExchange?.id);
-		}
-	}
-
-	captureAgentResponse(content: string, createdAt: string): void {
-		if (!this.accepting) {
-			throw new Error("Memory capture runtime is closed");
-		}
-		if (!this.activeExchange) {
 			return;
 		}
 
 		try {
-			this.queue.appendMessage(this.activeExchange.id, "agent", content, createdAt);
+			if (!this.activeExchange) {
+				this.activeExchange = await this.store.startExchange(message, message.content);
+				return;
+			}
+			await this.store.appendMessage(this.activeExchange.id, "user", message.content, message.startedAt);
 		} catch (error) {
-			logCaptureFailure(this.queue, "capture-agent", this.activeExchange, error, this.activeExchange.id);
+			await logCaptureFailure(this.store, "capture-user", message, error, this.activeExchange?.id);
 		}
 	}
 
-	settleActiveExchange(settledAt: string): void {
+	async captureAgentResponse(content: string, createdAt: string): Promise<void> {
+		if (!this.accepting || !this.activeExchange) {
+			return;
+		}
+
+		try {
+			await this.store.appendMessage(this.activeExchange.id, "agent", content, createdAt);
+		} catch (error) {
+			await logCaptureFailure(this.store, "capture-agent", this.activeExchange, error, this.activeExchange.id);
+		}
+	}
+
+	async settleActiveExchange(settledAt: string): Promise<void> {
 		if (!this.activeExchange) {
 			return;
 		}
 		const exchange = this.activeExchange;
 		try {
-			this.queue.settleExchange(exchange.id, settledAt);
+			await this.store.settleExchange(exchange.id, settledAt);
 			this.activeExchange = undefined;
 			this.wake();
 		} catch (error) {
-			logCaptureFailure(this.queue, "settle-exchange", exchange, error, exchange.id);
+			await logCaptureFailure(this.store, "settle-exchange", exchange, error, exchange.id);
 		}
 	}
 
@@ -119,11 +113,11 @@ export class MemoryCaptureRuntime {
 		if (!this.accepting) {
 			return;
 		}
-		this.settleActiveExchange(new Date().toISOString());
-		await this.flight;
+		await this.settleActiveExchange(new Date().toISOString());
 		this.accepting = false;
 		this.abortController.abort();
-		this.queue.close();
+		await this.flight;
+		await this.store.close();
 	}
 
 	private async run(): Promise<void> {
@@ -133,8 +127,11 @@ export class MemoryCaptureRuntime {
 				await this.drainUnextractedExchanges();
 			} while (this.wakeRequested && this.accepting);
 		} catch (error) {
+			if (!this.accepting && isAbortError(error)) {
+				return;
+			}
 			this.failed = true;
-			recordMemoryError(this.queue, {
+			await recordMemoryFailure(this.store, {
 				component: "memory",
 				stage: "extract-exchange",
 				error: error instanceof Error ? error.message : String(error),
@@ -144,60 +141,46 @@ export class MemoryCaptureRuntime {
 
 	private async drainUnextractedExchanges(): Promise<void> {
 		while (this.accepting) {
-			const exchange = this.queue.nextUnextractedExchange();
-			if (!exchange) {
+			const exchange = await this.store.nextUnextractedExchange();
+			if (!exchange || !this.accepting) {
 				return;
 			}
 			const facts = await this.extractor.extract(toExtractionExchange(exchange), this.abortController.signal);
-			const queuedIds = this.queue.completeExtraction(exchange, facts, new Date().toISOString());
-			if (queuedIds.length > 0) {
-				this.wakeConsumer();
-			}
+			await this.store.completeExtraction(exchange, facts, new Date().toISOString());
 		}
 	}
 }
 
-export function registerMemoryCapture(pi: ExtensionAPI): void {
+export function registerMemory(pi: ExtensionAPI): void {
 	let runtime: MemoryCaptureRuntime | undefined;
 
 	pi.on("session_start", (_event, ctx) => {
-		const config = createMemoryConfig();
-		let queue: MemoryQueue | undefined;
 		try {
-			queue = new MemoryQueue(config.databasePath);
+			const config = createMemoryConfig();
+			const worker = new MemoryWorkerClient({
+				...config,
+				piSessionId: ctx.sessionManager.getSessionId(),
+				cwd: ctx.cwd,
+			});
 			const extractor = new MemoryExtractor(
 				new WorkflowModelClient(ctx.modelRegistry),
-				() => listMemoryTopics(config.knowledgeBaseDirectory),
+				() => worker.listTopics(),
 			);
-			runtime = new MemoryCaptureRuntime(
-				extractor,
-				queue,
-				() => pi.events.emit(MEMORY_QUEUE_WAKE_EVENT, undefined),
-			);
+			runtime = new MemoryCaptureRuntime(extractor, worker);
 			runtime.wake();
-		} catch (error) {
+		} catch {
 			runtime = undefined;
-			if (queue) {
-				recordMemoryError(queue, {
-					component: "memory",
-					stage: "capture-start",
-					pi_session_id: ctx.sessionManager.getSessionId(),
-					cwd: ctx.cwd,
-					error: error instanceof Error ? error.message : String(error),
-				});
-				queue.close();
-			}
 		}
 	});
 
-	pi.on("message_end", (event, ctx) => {
+	pi.on("message_end", async (event, ctx) => {
 		const content = getConversationMessageText(event.message);
 		if (content.length === 0) {
 			return;
 		}
 		const createdAt = new Date(event.message.timestamp).toISOString();
 		if (event.message.role === "user") {
-			runtime?.captureUserMessage({
+			await runtime?.captureUserMessage({
 				piSessionId: ctx.sessionManager.getSessionId(),
 				cwd: ctx.cwd,
 				content,
@@ -206,12 +189,12 @@ export function registerMemoryCapture(pi: ExtensionAPI): void {
 			return;
 		}
 		if (event.message.role === "assistant" && event.message.stopReason === "stop") {
-			runtime?.captureAgentResponse(content, createdAt);
+			await runtime?.captureAgentResponse(content, createdAt);
 		}
 	});
 
-	pi.on("agent_settled", () => {
-		runtime?.settleActiveExchange(new Date().toISOString());
+	pi.on("agent_settled", async () => {
+		await runtime?.settleActiveExchange(new Date().toISOString());
 	});
 
 	pi.on("session_shutdown", async () => {
@@ -234,14 +217,14 @@ export function getConversationMessageText(message: AgentEndEvent["messages"][nu
 		.join("\n\n");
 }
 
-function logCaptureFailure(
-	writer: MemoryErrorWriter,
+async function logCaptureFailure(
+	store: Pick<MemoryExchangeStore, "logError">,
 	stage: "capture-user" | "capture-agent" | "settle-exchange",
 	exchange: Pick<NewMemoryExchange, "piSessionId" | "cwd">,
 	error: unknown,
 	exchangeId?: bigint,
-): void {
-	recordMemoryError(writer, {
+): Promise<void> {
+	await recordMemoryFailure(store, {
 		component: "memory",
 		stage,
 		pi_session_id: exchange.piSessionId,
@@ -249,4 +232,19 @@ function logCaptureFailure(
 		...(exchangeId === undefined ? {} : { exchange_id: exchangeId.toString() }),
 		error: error instanceof Error ? error.message : String(error),
 	});
+}
+
+async function recordMemoryFailure(
+	store: Pick<MemoryExchangeStore, "logError">,
+	entry: Record<string, unknown>,
+): Promise<void> {
+	try {
+		await store.logError(entry);
+	} catch {
+		// Memory logging must not interrupt the main Pi session.
+	}
+}
+
+function isAbortError(error: unknown): boolean {
+	return error instanceof DOMException && error.name === "AbortError";
 }

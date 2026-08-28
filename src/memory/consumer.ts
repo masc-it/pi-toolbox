@@ -1,11 +1,8 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
-import { createMemoryConfig, MEMORY_BATCH_MAX_BYTES } from "./config.ts";
-import { MEMORY_QUEUE_WAKE_EVENT } from "./capture.ts";
+import { MEMORY_BATCH_MAX_BYTES } from "./config.ts";
 import { MemoryCurator, type CuratorBatch } from "./curator.ts";
 import { acquireMemoryLock } from "./lock.ts";
 import { recordMemoryError, type MemoryErrorWriter } from "./log.ts";
-import { MemoryQueue, type PendingMemoryBatch } from "./queue.ts";
-import { MemoryRepository } from "./repository.ts";
+import type { PendingMemoryBatch } from "./queue.ts";
 
 interface ConsumerQueue extends MemoryErrorWriter {
 	nextPendingBatch(): PendingMemoryBatch | null;
@@ -162,50 +159,6 @@ export function buildBoundedBatch(pending: PendingMemoryBatch): CuratorBatch {
 		throw new Error("Memory batch must contain at least one row");
 	}
 	return { cwd: pending.cwd, rows };
-}
-
-export function registerMemoryConsumer(pi: ExtensionAPI): void {
-	let consumer: MemoryConsumer | undefined;
-	let unsubscribeWake: (() => void) | undefined;
-
-	pi.on("session_start", (_event, ctx) => {
-		const config = createMemoryConfig();
-		let queue: MemoryQueue | undefined;
-		try {
-			queue = new MemoryQueue(config.databasePath);
-			const repository = new MemoryRepository(config.knowledgeBaseDirectory);
-			consumer = new MemoryConsumer(
-				queue,
-				new MemoryCurator(),
-				repository,
-				`${config.databasePath}.lock`,
-			);
-			unsubscribeWake = pi.events.on(MEMORY_QUEUE_WAKE_EVENT, () => consumer?.wake());
-			consumer.wake();
-		} catch (error) {
-			unsubscribeWake?.();
-			unsubscribeWake = undefined;
-			consumer = undefined;
-			if (queue) {
-				recordMemoryError(queue, {
-					component: "memory",
-					stage: "consumer-start",
-					pi_session_id: ctx.sessionManager.getSessionId(),
-					cwd: ctx.cwd,
-					error: error instanceof Error ? error.message : String(error),
-				});
-				queue.close();
-			}
-		}
-	});
-
-	pi.on("session_shutdown", async () => {
-		unsubscribeWake?.();
-		unsubscribeWake = undefined;
-		const activeConsumer = consumer;
-		consumer = undefined;
-		await activeConsumer?.close();
-	});
 }
 
 class MemoryConsumerFailure extends Error {

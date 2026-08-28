@@ -60,7 +60,7 @@ export interface MemoryExtractionExchange {
 }
 
 type ExtractorModelClient = Pick<WorkflowModelClient, "completeText">;
-type MemoryTopicProvider = () => string[];
+type MemoryTopicProvider = () => string[] | Promise<string[]>;
 
 export class MemoryExtractor {
 	constructor(
@@ -69,9 +69,10 @@ export class MemoryExtractor {
 	) {}
 
 	async extract(exchange: MemoryExtractionExchange, signal: AbortSignal): Promise<ExtractedMemoryFact[]> {
+		const memoryTopics = await this.getMemoryTopics();
 		const output = await this.modelClient.completeText({
 			profile: MEMORY_EXTRACTOR_PROFILE,
-			systemPrompt: buildExtractorSystemPrompt(this.getMemoryTopics()),
+			systemPrompt: buildExtractorSystemPrompt(memoryTopics),
 			prompt: buildExtractorExchangePrompt(exchange),
 			signal,
 		});
