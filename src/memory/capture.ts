@@ -166,7 +166,7 @@ export function registerMemory(pi: ExtensionAPI): void {
 			});
 			const extractor = new MemoryExtractor(
 				new WorkflowModelClient(ctx.modelRegistry),
-				() => worker.listTopics(),
+				(cwd) => worker.getRoutingContext(cwd),
 			);
 			runtime = new MemoryCaptureRuntime(extractor, worker);
 			runtime.wake();

@@ -7,21 +7,23 @@ Created: 2026-08-26
 
 Memory keeps a current knowledge base about the user and their work. It runs in the background during normal Pi conversations. The user does not need to call a tool or open a Toolbox screen.
 
-The knowledge base lives at `~/work-memory`. It is a Git repository that follows Open Knowledge Format (OKF) v0.2. Memory initializes the repository, root index, and topic directories when the path does not exist.
+The knowledge base lives at `~/work-memory`. It is a Git repository that follows Open Knowledge Format (OKF) v0.2. Memory initializes the repository, root index, collection directories, and collection indices when the path does not exist.
 
 Memory stores only durable facts extracted from complete conversation exchanges. An exchange contains the user messages and successful agent responses produced before Pi becomes fully settled.
 
 ## Knowledge base
 
-The initial directories define the first topics:
+The hierarchy represents ownership and scope:
 
-- `coding`
-- `docs-style`
-- `personal-principles`
-- `projects`
-- `team`
+- `projects/<project>` contains knowledge specific to one project.
+- `coding` contains reusable user-wide coding practices.
+- `docs-style` contains reusable documentation preferences.
+- `personal-principles` contains user-wide principles.
+- `team` contains team-wide practices.
 
-Each knowledge concept is a Markdown file with YAML frontmatter. The extractor receives the current top-level directories as topics and may propose a new lowercase kebab-case topic when none applies.
+Each knowledge concept is a Markdown file with YAML frontmatter. Project collections are resolved deterministically from a lowercase kebab-case form of the canonical Git root name. The extractor receives the current project collection and all available collections. It cannot invent collection roots or project names.
+
+The hierarchy is intentionally shallow. Global concepts are stored directly under their global collection, while project concepts are stored directly under `projects/<project>`. Cross-cutting classifications use frontmatter tags instead of deeper directories.
 
 The knowledge base represents the latest known state:
 
@@ -30,7 +32,7 @@ The knowledge base represents the latest known state:
 - A newer contradiction replaces the older fact.
 - Git provides the repository's history.
 
-Root and topic `index.md` files are maintained when concepts are added, moved, or removed.
+The root, `projects`, global collection, and project collection `index.md` files are maintained when concepts or project collections change.
 
 ### Concept frontmatter
 
@@ -41,11 +43,33 @@ Memory uses a simplified variant of the OKF frontmatter.
 type: <concept type>
 title: <display name>
 description: <one-line summary>
-tags: [<topic>, <optional tags>]
+tags: [<cross-cutting tag>, <optional tags>]
 ---
 ```
 
 `type` uses a clear concept name such as `Preference`, `Project`, `Team`, `Principle`, or `Coding Practice`.
+
+### Index frontmatter
+
+Every `index.md` starts with valid YAML frontmatter. The root index declares the OKF version:
+
+```yaml
+---
+okf_version: "0.2"
+---
+```
+
+Every global, projects, and project collection index declares its index type and navigation metadata:
+
+```yaml
+---
+type: index
+title: <display name>
+description: <one-line collection summary>
+---
+```
+
+Collection index frontmatter may contain only `type`, `title`, and `description`. All three fields are required.
 
 ## Facts
 
@@ -111,14 +135,14 @@ CREATE TABLE memory_queue (
     cwd TEXT NOT NULL,
     supported_by TEXT NOT NULL
         CHECK (supported_by IN ('user', 'agent', 'both')),
-    topic TEXT NOT NULL,
+    collection_path TEXT NOT NULL,
     fact TEXT NOT NULL,
     created_at TEXT NOT NULL,
     processed_at TEXT
 ) STRICT;
 ```
 
-`cwd` is converted to a canonical absolute path before insertion. `topic` must be one of the configured knowledge-base topics. Timestamps use ISO 8601 UTC values.
+`cwd` is converted to a canonical absolute path before insertion. `collection_path` must be a configured global collection or a validated `projects/<project>` path available to the extractor. Timestamps use ISO 8601 UTC values.
 
 Processed rows remain in the table with `processed_at` set. They can be inspected for operational debugging.
 
@@ -153,7 +177,7 @@ For each fact it:
 
 1. Checks that the statement is directly supported by the exchange.
 2. Records whether the supporting content came from the user, agent, or both.
-3. Assigns an existing topic or proposes a new one.
+3. Assigns the current project collection, another available project collection, or the applicable global collection.
 4. Writes one queue row linked to the complete exchange.
 
 An exchange with no durable facts produces no queue rows. The exchange remains stored and is marked extracted.
@@ -174,13 +198,16 @@ First identify the exchange purpose:
 
 A request does not prove that the requested state exists. Ignore execution narration, task progress, commit hashes, generated artifact details, temporary local state, and facts that only say an action happened. Agent statements cannot establish user preferences or accepted decisions.
 
-Emit one canonical fact when both roles repeat the same information. Preserve exact identifiers, qualifiers, scope, and negation. Set supportedBy to user, agent, or both. Assign one available topic, or propose a concise lowercase kebab-case topic when none applies. Return JSON only and use an empty facts list when there is no durable knowledge.
+Emit one canonical fact when both roles repeat the same information. Preserve exact identifiers, qualifiers, scope, and negation. Set supportedBy to user, agent, or both. Store current-project knowledge in the injected current project collection. Store only reusable user-wide or team-wide knowledge in global collections. Set collectionPath to exactly one available collection and never use projects by itself. Return JSON only and use an empty facts list when there is no durable knowledge.
 
-Available topics:
-{{memory_topics}}
+Current project collection:
+{{current_project_collection}}
+
+Available collections:
+{{memory_collections}}
 
 Output:
-{"facts":[{"supportedBy":"agent","topic":"projects","fact":"OPM V2 requests bypass the VLM worker."}]}
+{"facts":[{"supportedBy":"agent","collectionPath":"projects/contentai","fact":"OPM V2 requests bypass the VLM worker."}]}
 
 Working directory: {{cwd}}
 Conversation exchange: {{ordered_messages}}
@@ -206,7 +233,7 @@ Incoming facts are candidates for durable memory, not mandatory writes. Group re
 For each subject:
 - Reject task progress, verification evidence, metrics, commit history, generated artifact details, temporary local state, and facts that only describe an action.
 - Search the complete knowledge base for the subject and its important identifiers before editing.
-- Prefer an existing canonical concept even when it is stored under a different topic. The assigned topic is a filing hint for new concepts.
+- Treat collectionPath as the required destination directory. Project concepts must be stored under projects/<project>.
 - Merge equivalent statements into one concise statement.
 - Replace contradictory or obsolete knowledge everywhere it appears.
 - Remove related historical statements that no longer describe current state.
@@ -222,7 +249,7 @@ Available tools:
 - Use edit to reconcile existing complete documents, including frontmatter when needed.
 - Use write only to create new concept documents.
 
-Keep frontmatter valid YAML and quote string values that contain whitespace. Update index.md only when a concept is created, renamed, removed, moved, or its summary changes. Make no changes when the knowledge base is already canonical and current.
+Keep frontmatter valid YAML and quote string values that contain whitespace. Preserve the root index's `okf_version` frontmatter. Every other index requires `type: index`, a non-empty title, and a one-line description. Update index.md only when a concept is created, renamed, removed, moved, or its summary changes. Make no changes when the knowledge base is already canonical and current.
 ```
 
 The initial user message contains only the JSON batch payload: `projectWorkingDirectory` and ordered `facts`.
@@ -291,7 +318,7 @@ Memory failures do not fail the user's main agent turn. Errors are stored in the
 Boundary validation is strict:
 
 - Extractor output must match the fact schema.
-- Queue topics and senders must be valid.
+- Queue collection paths, provenance, and senders must be valid.
 - The knowledge-base path must remain under `~/work-memory`.
 - Changed concept documents must satisfy OKF v0.2 minimum rules.
 - Git must succeed before changed rows are completed.
@@ -311,7 +338,7 @@ Boundary validation is strict:
 
 Status: done
 
-Build the SQLite store, queue schema, indices, topic validation, canonical path handling, and OKF validation boundary.
+Build the SQLite store, queue schema, indices, collection validation, canonical path handling, and OKF validation boundary.
 
 Tasks:
 
@@ -325,7 +352,7 @@ QA checkpoint:
 - Insert facts for several sessions and working directories.
 - Confirm pending queries use the partial indices.
 - Mark one batch as processed and confirm it leaves the pending result set.
-- Reject invalid topics, senders, timestamps, and paths outside the KB.
+- Reject invalid collection paths, senders, timestamps, and paths outside the KB.
 
 ### Phase 2: Fact extraction
 
@@ -395,3 +422,26 @@ QA checkpoint:
 - Capture messages while the consumer is curating and confirm worker acknowledgements preserve exchange order.
 - Hold SQLite contention and confirm Pi input and rendering continue while the worker waits.
 - Reload or exit during extraction and curation and confirm shutdown cancels background work and releases the lock.
+
+### Phase 5: Hierarchical collections
+
+Status: done
+
+Separate project ownership from reusable global knowledge and enforce a shallow collection hierarchy.
+
+Tasks:
+
+- Status: done - Replace flat topics with validated collection paths.
+- Status: done - Resolve the current project collection from the canonical Git root in the Memory worker.
+- Status: done - Restrict extraction to the current project and existing global or project collections.
+- Status: done - Require the curator to write project concepts under `projects/<project>` and maintain collection indices.
+- Status: done - Enforce global and project document layouts at the repository and OKF boundaries.
+- Status: done - Require valid root and collection frontmatter on every `index.md`.
+- Status: done - Reset the operational SQLite schema and migrate the existing knowledge base into project collections.
+
+QA checkpoint:
+
+- Extract a project fact and confirm it is queued for the current `projects/<project>` collection.
+- Extract a reusable preference and confirm it remains in the applicable global collection.
+- Reject `projects`, unknown roots, invalid project slugs, and collection paths deeper than two directories.
+- Confirm every global and project collection has an `index.md` and project concepts are not stored directly under `projects`.

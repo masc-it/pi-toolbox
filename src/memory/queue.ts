@@ -3,16 +3,16 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import {
 	MEMORY_BATCH_MAX_FACTS,
+	isMemoryCollectionPath,
 	isMemoryFactSupport,
 	isMemorySender,
-	isMemoryTopic,
+	type MemoryCollectionPath,
 	type MemoryFactSupport,
 	type MemorySender,
-	type MemoryTopic,
 } from "./config.ts";
 import { canonicalizeWorkingDirectory } from "./paths.ts";
 
-const SCHEMA_VERSION = 2;
+const SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_exchanges (
@@ -59,7 +59,7 @@ CREATE TABLE IF NOT EXISTS memory_queue (
     cwd TEXT NOT NULL,
     supported_by TEXT NOT NULL
         CHECK (supported_by IN ('user', 'agent', 'both')),
-    topic TEXT NOT NULL,
+    collection_path TEXT NOT NULL,
     fact TEXT NOT NULL,
     created_at TEXT NOT NULL,
     processed_at TEXT
@@ -110,7 +110,7 @@ export interface ExtractableMemoryExchange extends OpenMemoryExchange {
 
 export interface ExtractedMemoryFact {
 	supportedBy: MemoryFactSupport;
-	topic: MemoryTopic;
+	collectionPath: MemoryCollectionPath;
 	fact: string;
 }
 
@@ -151,7 +151,7 @@ interface DatabaseQueueRow {
 	pi_session_id: string;
 	cwd: string;
 	supported_by: string;
-	topic: string;
+	collection_path: string;
 	fact: string;
 	created_at: string;
 	processed_at: string | null;
@@ -222,8 +222,8 @@ export class MemoryQueue {
 			WHERE id = ? AND settled_at IS NOT NULL AND extracted_at IS NULL
 		`);
 		this.insertFactStatement = this.database.prepare(`
-			INSERT INTO memory_queue (exchange_id, pi_session_id, cwd, supported_by, topic, fact, created_at)
-			VALUES (@exchangeId, @piSessionId, @cwd, @supportedBy, @topic, @fact, @createdAt)
+			INSERT INTO memory_queue (exchange_id, pi_session_id, cwd, supported_by, collection_path, fact, created_at)
+			VALUES (@exchangeId, @piSessionId, @cwd, @supportedBy, @collectionPath, @fact, @createdAt)
 		`);
 		this.insertLogStatement = this.database.prepare(`
 			INSERT INTO logs (msg, created_at)
@@ -237,7 +237,7 @@ export class MemoryQueue {
 			ORDER BY first_id
 		`);
 		this.pendingRowsForCwdStatement = this.database.prepare(`
-			SELECT id, exchange_id, pi_session_id, cwd, supported_by, topic, fact, created_at, processed_at
+			SELECT id, exchange_id, pi_session_id, cwd, supported_by, collection_path, fact, created_at, processed_at
 			FROM memory_queue
 			WHERE processed_at IS NULL AND cwd = ?
 			ORDER BY id
@@ -331,7 +331,7 @@ export class MemoryQueue {
 					piSessionId: exchange.piSessionId,
 					cwd: exchange.cwd,
 					supportedBy: fact.supportedBy,
-					topic: fact.topic,
+					collectionPath: fact.collectionPath,
 					fact: fact.fact,
 					createdAt: exchange.settledAt,
 				}).lastInsertRowid as bigint,
@@ -421,11 +421,11 @@ function validateExtractedFact(input: ExtractedMemoryFact): ExtractedMemoryFact 
 	if (!isMemoryFactSupport(input.supportedBy)) {
 		throw new Error(`Invalid Memory fact support: ${String(input.supportedBy)}`);
 	}
-	if (!isMemoryTopic(input.topic)) {
-		throw new Error(`Invalid Memory topic: ${String(input.topic)}`);
+	if (!isMemoryCollectionPath(input.collectionPath)) {
+		throw new Error(`Invalid Memory collection path: ${String(input.collectionPath)}`);
 	}
 	assertNonEmpty(input.fact, "Fact");
-	return { supportedBy: input.supportedBy, topic: input.topic, fact: input.fact.trim() };
+	return { supportedBy: input.supportedBy, collectionPath: input.collectionPath, fact: input.fact.trim() };
 }
 
 function toExtractableExchange(row: DatabaseExchangeRow): Omit<ExtractableMemoryExchange, "messages"> {
@@ -464,8 +464,8 @@ function toQueueRow(row: DatabaseQueueRow): MemoryQueueRow {
 	if (!isMemoryFactSupport(row.supported_by)) {
 		throw new Error(`Queue contains invalid Memory fact support: ${row.supported_by}`);
 	}
-	if (!isMemoryTopic(row.topic)) {
-		throw new Error(`Queue contains an invalid topic: ${row.topic}`);
+	if (!isMemoryCollectionPath(row.collection_path)) {
+		throw new Error(`Queue contains an invalid collection path: ${row.collection_path}`);
 	}
 	assertIsoUtcTimestamp(row.created_at, "Queue creation timestamp");
 	if (row.processed_at !== null) {
@@ -478,7 +478,7 @@ function toQueueRow(row: DatabaseQueueRow): MemoryQueueRow {
 		piSessionId: row.pi_session_id,
 		cwd: row.cwd,
 		supportedBy: row.supported_by,
-		topic: row.topic,
+		collectionPath: row.collection_path,
 		fact: row.fact,
 		createdAt: row.created_at,
 		processedAt: row.processed_at,

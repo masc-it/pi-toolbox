@@ -1,7 +1,13 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, posix } from "node:path";
-import { isMemoryTopic, MEMORY_TOPICS } from "./config.ts";
+import { listProjectCollections } from "./collections.ts";
+import {
+	isMemoryCollectionRoot,
+	isMemoryCollectionSegment,
+	isMemoryGlobalCollection,
+	MEMORY_COLLECTION_ROOTS,
+} from "./config.ts";
 import { validateOkfDocument } from "./okf.ts";
 import { canonicalizeKnowledgeBaseDirectory } from "./paths.ts";
 
@@ -20,6 +26,7 @@ export class MemoryRepository {
 		this.path = canonicalizeKnowledgeBaseDirectory(path);
 		runGit(this.path, ["rev-parse", "--git-dir"]);
 		this.hasHead = gitSucceeds(this.path, ["rev-parse", "--verify", "HEAD"]);
+		this.validateChanges([...snapshotWorktree(this.path).keys()]);
 	}
 
 	assertClean(): void {
@@ -61,6 +68,7 @@ export class MemoryRepository {
 				validateOkfDocument(this.path, absolutePath);
 			}
 		}
+		assertCollectionIndexes(this.path);
 	}
 
 	commit(paths: readonly string[]): void {
@@ -101,18 +109,80 @@ function validateRelativeDocumentPath(path: string): void {
 		}
 		return;
 	}
-	if (!isMemoryTopic(parts[0])) {
-		throw new Error(`Knowledge-base document uses an invalid topic: ${path}`);
+
+	const root = parts[0];
+	const filename = parts.at(-1)!;
+	const conceptName = posix.basename(filename, ".md");
+	if (!isMemoryCollectionRoot(root) || !isMemoryCollectionSegment(conceptName)) {
+		throw new Error(`Knowledge-base document uses an invalid collection path: ${path}`);
+	}
+	if (parts.length === 2) {
+		if (root === "projects" && filename !== "index.md") {
+			throw new Error(`Project concepts must be stored under projects/<project>: ${path}`);
+		}
+		if (root !== "projects" && !isMemoryGlobalCollection(root)) {
+			throw new Error(`Knowledge-base document uses an invalid global collection: ${path}`);
+		}
+		return;
+	}
+	if (parts.length === 3 && root === "projects" && isMemoryCollectionSegment(parts[1])) {
+		return;
+	}
+	throw new Error(`Knowledge-base hierarchy supports only global collections and projects/<project>: ${path}`);
+}
+
+function assertCollectionIndexes(root: string): void {
+	for (const collectionRoot of MEMORY_COLLECTION_ROOTS) {
+		if (!existsSync(join(root, collectionRoot, "index.md"))) {
+			throw new Error(`Memory collection is missing its index: ${collectionRoot}/index.md`);
+		}
+	}
+	for (const collectionPath of listProjectCollections(root)) {
+		if (!existsSync(join(root, collectionPath, "index.md"))) {
+			throw new Error(`Memory project collection is missing its index: ${collectionPath}/index.md`);
+		}
 	}
 }
 
 function initializeMemoryRepository(path: string): void {
 	mkdirSync(path, { recursive: true, mode: 0o700 });
 	runGit(path, ["init"]);
-	writeFileSync(join(path, "index.md"), "# Knowledge base\n", { encoding: "utf8", mode: 0o600 });
-	for (const topic of MEMORY_TOPICS) {
-		mkdirSync(join(path, topic));
+	writeFileSync(
+		join(path, "index.md"),
+		`---\nokf_version: "0.2"\n---\n\n# Knowledge base\n\n${MEMORY_COLLECTION_ROOTS.map((root) => `- [${formatCollectionTitle(root)}](${root}/)`).join("\n")}\n`,
+		{ encoding: "utf8", mode: 0o600 },
+	);
+	for (const root of MEMORY_COLLECTION_ROOTS) {
+		mkdirSync(join(path, root));
+		writeFileSync(
+			join(path, root, "index.md"),
+			formatCollectionIndex(formatCollectionTitle(root), collectionDescription(root)),
+			{ encoding: "utf8", mode: 0o600 },
+		);
 	}
+}
+
+function formatCollectionIndex(title: string, description: string): string {
+	return `---\ntype: index\ntitle: ${JSON.stringify(title)}\ndescription: ${JSON.stringify(description)}\n---\n\n# ${title}\n`;
+}
+
+function collectionDescription(root: (typeof MEMORY_COLLECTION_ROOTS)[number]): string {
+	switch (root) {
+		case "coding":
+			return "Reusable user-wide coding practices.";
+		case "docs-style":
+			return "Reusable documentation preferences and conventions.";
+		case "personal-principles":
+			return "User-wide personal and engineering principles.";
+		case "projects":
+			return "Project-specific knowledge collections.";
+		case "team":
+			return "Team-wide practices and conventions.";
+	}
+}
+
+function formatCollectionTitle(value: string): string {
+	return value.split("-").map((part) => `${part[0]?.toUpperCase() ?? ""}${part.slice(1)}`).join(" ");
 }
 
 function snapshotWorktree(root: string): Map<string, Buffer> {

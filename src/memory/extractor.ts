@@ -1,12 +1,14 @@
-import { readdirSync } from "node:fs";
+import { basename } from "node:path";
 import type { WorkflowModelProfile } from "../domain.ts";
 import type { WorkflowModelClient } from "../model/client.ts";
 import {
+	isMemoryCollectionPath,
 	isMemoryFactSupport,
-	isMemoryTopic,
-	MEMORY_TOPICS,
+	MEMORY_GLOBAL_COLLECTIONS,
+	toMemoryCollectionSegment,
+	type MemoryCollectionPath,
 	type MemoryFactSupport,
-	type MemoryTopic,
+	type MemoryRoutingContext,
 } from "./config.ts";
 import type { ExtractableMemoryExchange, MemoryExchangeMessage } from "./queue.ts";
 
@@ -16,7 +18,7 @@ export const MEMORY_EXTRACTOR_PROFILE: WorkflowModelProfile = {
 	thinkingLevel: "off",
 };
 
-function buildExtractorSystemPrompt(memoryTopics: readonly string[]): string {
+function buildExtractorSystemPrompt(routing: MemoryRoutingContext): string {
 	return `You extract durable current knowledge from a complete conversation exchange between a user and a coding agent.
 
 First identify the exchange purpose and apply the corresponding rule:
@@ -36,21 +38,25 @@ Rules:
 - Emit one canonical fact when the user and agent repeat the same information.
 - Write each fact as one clear, self-contained sentence. Preserve exact identifiers, qualifiers, scope, and negation.
 - Set supportedBy to user, agent, or both according to where the fact is directly supported.
-- Assign each fact exactly one available topic when applicable.
-- If no topic applies, propose a concise lowercase kebab-case topic.
-- Use the working directory only to name a project mentioned in the exchange. Never extract the directory itself as a fact.
+- Store facts about the current project's architecture, behavior, constraints, workflows, and conventions in the current project collection.
+- Store reusable user-wide coding practices in coding, documentation preferences in docs-style, personal principles in personal-principles, and team-wide practices in team.
+- Use an existing project collection only when the fact explicitly concerns that other project.
+- Set collectionPath to exactly one available collection. Never invent a collection or use projects by itself.
+- Never duplicate one fact across project and global collections. Use concept tags later for cross-cutting classification.
+- Use the working directory only to understand the current project. Never extract the directory itself as a fact.
 - Return JSON only. Return an empty facts list when there is no durable knowledge.
 
-Available topics:
-${JSON.stringify(memoryTopics)}
+Current project collection: ${routing.currentProjectCollection}
+Available collections:
+${JSON.stringify(routing.availableCollections)}
 
 Output example:
-{"facts":[{"supportedBy":"agent","topic":"projects","fact":"OPM V2 requests bypass the VLM worker."}]}`;
+{"facts":[{"supportedBy":"agent","collectionPath":"${routing.currentProjectCollection}","fact":"Memory uses a dedicated worker for synchronous infrastructure."}]}`;
 }
 
 export interface ExtractedMemoryFact {
 	supportedBy: MemoryFactSupport;
-	topic: MemoryTopic;
+	collectionPath: MemoryCollectionPath;
 	fact: string;
 }
 
@@ -60,31 +66,25 @@ export interface MemoryExtractionExchange {
 }
 
 type ExtractorModelClient = Pick<WorkflowModelClient, "completeText">;
-type MemoryTopicProvider = () => string[] | Promise<string[]>;
+type MemoryRoutingProvider = (cwd: string) => MemoryRoutingContext | Promise<MemoryRoutingContext>;
 
 export class MemoryExtractor {
 	constructor(
 		private readonly modelClient: ExtractorModelClient,
-		private readonly getMemoryTopics: MemoryTopicProvider = () => [...MEMORY_TOPICS],
+		private readonly getRoutingContext: MemoryRoutingProvider = defaultRoutingContext,
 	) {}
 
 	async extract(exchange: MemoryExtractionExchange, signal: AbortSignal): Promise<ExtractedMemoryFact[]> {
-		const memoryTopics = await this.getMemoryTopics();
+		const routing = await this.getRoutingContext(exchange.cwd);
+		validateRoutingContext(routing);
 		const output = await this.modelClient.completeText({
 			profile: MEMORY_EXTRACTOR_PROFILE,
-			systemPrompt: buildExtractorSystemPrompt(memoryTopics),
+			systemPrompt: buildExtractorSystemPrompt(routing),
 			prompt: buildExtractorExchangePrompt(exchange),
 			signal,
 		});
-		return parseExtractorOutput(output);
+		return parseExtractorOutput(output, new Set(routing.availableCollections));
 	}
-}
-
-export function listMemoryTopics(knowledgeBaseDirectory: string): string[] {
-	return readdirSync(knowledgeBaseDirectory, { withFileTypes: true })
-		.filter((entry) => entry.isDirectory() && isMemoryTopic(entry.name))
-		.map((entry) => entry.name)
-		.sort();
 }
 
 export function toExtractionExchange(exchange: ExtractableMemoryExchange): MemoryExtractionExchange {
@@ -101,7 +101,10 @@ Conversation exchange:
 ${JSON.stringify(exchange.messages.map((message) => ({ role: message.sentBy, content: message.content })))}`;
 }
 
-export function parseExtractorOutput(output: string): ExtractedMemoryFact[] {
+export function parseExtractorOutput(
+	output: string,
+	availableCollections?: ReadonlySet<string>,
+): ExtractedMemoryFact[] {
 	let value: unknown;
 	try {
 		value = JSON.parse(output) as unknown;
@@ -114,20 +117,45 @@ export function parseExtractorOutput(output: string): ExtractedMemoryFact[] {
 	}
 
 	return value.facts.map((item, index) => {
-		if (!isRecord(item) || !hasOnlyKeys(item, ["supportedBy", "topic", "fact"])) {
+		if (!isRecord(item) || !hasOnlyKeys(item, ["supportedBy", "collectionPath", "fact"])) {
 			throw new Error(`Memory extractor fact ${index + 1} has an invalid shape`);
 		}
 		if (!isMemoryFactSupport(item.supportedBy)) {
 			throw new Error(`Memory extractor fact ${index + 1} has invalid support`);
 		}
-		if (!isMemoryTopic(item.topic)) {
-			throw new Error(`Memory extractor fact ${index + 1} has an invalid topic`);
+		if (!isMemoryCollectionPath(item.collectionPath)) {
+			throw new Error(`Memory extractor fact ${index + 1} has an invalid collection path`);
+		}
+		if (availableCollections && !availableCollections.has(item.collectionPath)) {
+			throw new Error(`Memory extractor fact ${index + 1} uses an unavailable collection`);
 		}
 		if (typeof item.fact !== "string" || item.fact.trim().length === 0) {
 			throw new Error(`Memory extractor fact ${index + 1} has empty text`);
 		}
-		return { supportedBy: item.supportedBy, topic: item.topic, fact: item.fact.trim() };
+		return { supportedBy: item.supportedBy, collectionPath: item.collectionPath, fact: item.fact.trim() };
 	});
+}
+
+function defaultRoutingContext(cwd: string): MemoryRoutingContext {
+	const currentProjectCollection = `projects/${toMemoryCollectionSegment(basename(cwd))}`;
+	return {
+		currentProjectCollection,
+		availableCollections: [...MEMORY_GLOBAL_COLLECTIONS, currentProjectCollection].sort(),
+	};
+}
+
+function validateRoutingContext(routing: MemoryRoutingContext): void {
+	if (!isMemoryCollectionPath(routing.currentProjectCollection)) {
+		throw new Error("Memory routing returned an invalid current project collection");
+	}
+	if (
+		routing.availableCollections.length === 0 ||
+		new Set(routing.availableCollections).size !== routing.availableCollections.length ||
+		routing.availableCollections.some((collection) => !isMemoryCollectionPath(collection)) ||
+		!routing.availableCollections.includes(routing.currentProjectCollection)
+	) {
+		throw new Error("Memory routing returned invalid available collections");
+	}
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {

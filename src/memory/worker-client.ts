@@ -1,5 +1,5 @@
 import { Worker } from "node:worker_threads";
-import type { MemorySender } from "./config.ts";
+import type { MemoryRoutingContext, MemorySender } from "./config.ts";
 import type {
 	ExtractableMemoryExchange,
 	ExtractedMemoryFact,
@@ -87,8 +87,8 @@ export class MemoryWorkerClient {
 		return this.request("complete-extraction", { exchange, facts: [...facts], extractedAt });
 	}
 
-	listTopics(): Promise<string[]> {
-		return this.request("list-topics", null);
+	getRoutingContext(cwd: string): Promise<MemoryRoutingContext> {
+		return this.request("get-routing-context", { cwd });
 	}
 
 	async logError(entry: Record<string, unknown>): Promise<void> {

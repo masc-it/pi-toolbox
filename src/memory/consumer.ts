@@ -216,7 +216,7 @@ export function buildBoundedBatch(pending: PendingMemoryBatch): CuratorBatch {
 		const bytes = Buffer.byteLength(
 			JSON.stringify(candidate.map((item) => ({
 				supportedBy: item.supportedBy,
-				topic: item.topic,
+				collectionPath: item.collectionPath,
 				fact: item.fact,
 				observedAt: item.createdAt,
 			}))),

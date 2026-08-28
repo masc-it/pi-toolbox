@@ -2,8 +2,12 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { getAgentDir } from "@earendil-works/pi-coding-agent";
 
-export const MEMORY_TOPICS = ["coding", "docs-style", "personal-principles", "projects", "team"] as const;
-export type MemoryTopic = string;
+export const MEMORY_GLOBAL_COLLECTIONS = ["coding", "docs-style", "personal-principles", "team"] as const;
+export type MemoryGlobalCollection = (typeof MEMORY_GLOBAL_COLLECTIONS)[number];
+
+export const MEMORY_COLLECTION_ROOTS = [...MEMORY_GLOBAL_COLLECTIONS, "projects"] as const;
+export type MemoryCollectionRoot = (typeof MEMORY_COLLECTION_ROOTS)[number];
+export type MemoryCollectionPath = string;
 
 export const MEMORY_SENDERS = ["user", "agent"] as const;
 export type MemorySender = (typeof MEMORY_SENDERS)[number];
@@ -13,6 +17,11 @@ export type MemoryFactSupport = (typeof MEMORY_FACT_SUPPORT)[number];
 
 export const MEMORY_BATCH_MAX_FACTS = 10;
 export const MEMORY_BATCH_MAX_BYTES = 32 * 1024;
+
+export interface MemoryRoutingContext {
+	currentProjectCollection: MemoryCollectionPath;
+	availableCollections: MemoryCollectionPath[];
+}
 
 export interface MemoryConfig {
 	dataDirectory: string;
@@ -32,8 +41,35 @@ export function createMemoryConfig(
 	};
 }
 
-export function isMemoryTopic(value: unknown): value is MemoryTopic {
+export function isMemoryCollectionSegment(value: unknown): value is string {
 	return typeof value === "string" && /^[a-z0-9]+(?:-[a-z0-9]+)*$/.test(value);
+}
+
+export function toMemoryCollectionSegment(value: string): string {
+	const segment = value.trim().toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-|-$/g, "");
+	if (!isMemoryCollectionSegment(segment)) {
+		throw new Error(`Memory collection name cannot be converted to lowercase kebab-case: ${value}`);
+	}
+	return segment;
+}
+
+export function isMemoryCollectionRoot(value: unknown): value is MemoryCollectionRoot {
+	return typeof value === "string" && MEMORY_COLLECTION_ROOTS.some((root) => root === value);
+}
+
+export function isMemoryGlobalCollection(value: unknown): value is MemoryGlobalCollection {
+	return typeof value === "string" && MEMORY_GLOBAL_COLLECTIONS.some((collection) => collection === value);
+}
+
+export function isMemoryCollectionPath(value: unknown): value is MemoryCollectionPath {
+	if (isMemoryGlobalCollection(value)) {
+		return true;
+	}
+	if (typeof value !== "string") {
+		return false;
+	}
+	const parts = value.split("/");
+	return parts.length === 2 && parts[0] === "projects" && isMemoryCollectionSegment(parts[1]);
 }
 
 export function isMemorySender(value: unknown): value is MemorySender {

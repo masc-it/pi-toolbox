@@ -1,7 +1,7 @@
 import { parentPort, workerData } from "node:worker_threads";
+import { resolveMemoryRoutingContext } from "./collections.ts";
 import { MemoryConsumer } from "./consumer.ts";
 import { MemoryCurator } from "./curator.ts";
-import { listMemoryTopics } from "./extractor.ts";
 import { recordMemoryError } from "./log.ts";
 import { MemoryQueue } from "./queue.ts";
 import { MemoryRepository } from "./repository.ts";
@@ -73,9 +73,9 @@ class MemoryWorkerRuntime {
 		return ids;
 	}
 
-	listTopics(): string[] {
+	getRoutingContext(request: Extract<MemoryWorkerRequest, { method: "get-routing-context" }>) {
 		this.assertOpen();
-		return listMemoryTopics(this.config.knowledgeBaseDirectory);
+		return resolveMemoryRoutingContext(this.config.knowledgeBaseDirectory, request.params.cwd);
 	}
 
 	logError(request: Extract<MemoryWorkerRequest, { method: "log-error" }>): null {
@@ -143,8 +143,8 @@ async function handleRequest(value: unknown): Promise<void> {
 			case "complete-extraction":
 				result = runtime.completeExtraction(value);
 				break;
-			case "list-topics":
-				result = runtime.listTopics();
+			case "get-routing-context":
+				result = runtime.getRoutingContext(value);
 				break;
 			case "log-error":
 				result = runtime.logError(value);
@@ -218,7 +218,7 @@ function isMemoryWorkerRequest(value: unknown): value is MemoryWorkerRequest {
 			"settle-exchange",
 			"next-unextracted-exchange",
 			"complete-extraction",
-			"list-topics",
+			"get-routing-context",
 			"log-error",
 			"shutdown",
 		].includes(value.method) &&

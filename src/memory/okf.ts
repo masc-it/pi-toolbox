@@ -1,7 +1,7 @@
 import { readFileSync } from "node:fs";
 import { basename, dirname, extname, relative, sep } from "node:path";
 import { parseDocument } from "yaml";
-import { isMemoryTopic } from "./config.ts";
+import { isMemoryCollectionPath } from "./config.ts";
 import { canonicalizeKnowledgeBaseDirectory, resolveKnowledgeBaseDocumentPath } from "./paths.ts";
 
 export interface ValidatedOkfDocument {
@@ -21,13 +21,16 @@ export function validateOkfDocument(
 
 	const content = readFileSync(path, "utf8");
 	const filename = basename(path);
+	const relativeDirectory = relative(root, dirname(path)).split(sep).filter(Boolean).join("/");
 	if (filename === "index.md") {
-		validateIndex(content, dirname(path) === root);
+		if (relativeDirectory !== "" && relativeDirectory !== "projects" && !isMemoryCollectionPath(relativeDirectory)) {
+			throw new Error(`Memory index uses an invalid collection path: ${documentPath}`);
+		}
+		validateIndex(content, relativeDirectory === "");
 		return { path, kind: "index" };
 	}
-	const topic = relative(root, path).split(sep)[0];
-	if (!isMemoryTopic(topic)) {
-		throw new Error(`Memory concept must be stored under a configured topic: ${documentPath}`);
+	if (!isMemoryCollectionPath(relativeDirectory)) {
+		throw new Error(`Memory concept must be stored under a configured collection: ${documentPath}`);
 	}
 	validateConcept(content);
 	return { path, kind: "concept" };
@@ -51,26 +54,32 @@ function validateConcept(content: string): void {
 }
 
 function validateIndex(content: string, isRootIndex: boolean): void {
-	if (!content.startsWith("---\n") && !content.startsWith("---\r\n")) {
-		return;
-	}
-	if (!isRootIndex) {
-		throw new Error("Only the root OKF index may contain frontmatter");
-	}
 	const frontmatter = parseFrontmatter(content);
 	const keys = Object.keys(frontmatter);
-	if (keys.some((key) => key !== "okf_version")) {
-		throw new Error("Root OKF index frontmatter may contain only okf_version");
+	if (isRootIndex) {
+		if (keys.some((key) => key !== "okf_version")) {
+			throw new Error("Root OKF index frontmatter may contain only okf_version");
+		}
+		if (typeof frontmatter.okf_version !== "string" || frontmatter.okf_version.trim().length === 0) {
+			throw new Error("Root OKF index frontmatter requires a non-empty okf_version");
+		}
+		return;
 	}
-	if (typeof frontmatter.okf_version !== "string" || frontmatter.okf_version.trim().length === 0) {
-		throw new Error("Root OKF index frontmatter requires a non-empty okf_version");
+
+	if (keys.some((key) => !["type", "title", "description"].includes(key))) {
+		throw new Error("Collection index frontmatter may contain only type, title, and description");
 	}
+	if (frontmatter.type !== "index") {
+		throw new Error("Collection index frontmatter requires type: index");
+	}
+	validateRequiredSingleLineString(frontmatter.title, "title");
+	validateRequiredSingleLineString(frontmatter.description, "description");
 }
 
 function parseFrontmatter(content: string): Record<string, unknown> {
 	const match = /^---\r?\n([\s\S]*?)\r?\n---(?:\r?\n|$)/.exec(content);
 	if (!match) {
-		throw new Error("OKF concept must start with a complete YAML frontmatter block");
+		throw new Error("OKF document must start with a complete YAML frontmatter block");
 	}
 
 	const document = parseDocument(match[1] ?? "");
@@ -82,6 +91,12 @@ function parseFrontmatter(content: string): Record<string, unknown> {
 		throw new Error("OKF frontmatter must be a YAML mapping");
 	}
 	return value;
+}
+
+function validateRequiredSingleLineString(value: unknown, field: string): void {
+	if (typeof value !== "string" || value.trim().length === 0 || /[\r\n]/.test(value)) {
+		throw new Error(`Collection index ${field} must be a non-empty single-line string`);
+	}
 }
 
 function validateOptionalString(value: unknown, field: string): void {

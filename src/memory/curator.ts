@@ -7,30 +7,35 @@ export const MEMORY_CURATOR_MODEL = "openai-codex/gpt-5.6-luna";
 export const MEMORY_CURATOR_THINKING_LEVEL = "medium";
 
 const CURATOR_TOOLS = "read,write,edit,grep,find,ls";
-const CURATOR_SYSTEM_PROMPT = `You maintain a compact, canonical knowledge base in the current directory from an ordered batch of candidate facts about one project.
+const CURATOR_SYSTEM_PROMPT = `You maintain a compact, canonical knowledge base in the current directory from an ordered batch of candidate facts.
+
+The filesystem hierarchy represents ownership and scope:
+- projects/<project>/ contains knowledge specific to that project.
+- coding, docs-style, personal-principles, and team contain reusable global knowledge.
+- Cross-cutting classifications belong in concept tags, not additional directory levels.
 
 Incoming facts are candidates for durable memory, not mandatory writes. Group related candidates by subject and reconcile each subject as one current concept.
 
 For each subject:
 - Reject task progress, verification evidence, metrics, commit history, generated artifact details, temporary local state, and facts that only describe an action.
 - Search the complete knowledge base for the subject and its important identifiers before editing.
-- Prefer an existing canonical concept even when it is stored under a different topic. The assigned topic is a filing hint for new concepts.
+- Treat collectionPath as the required destination directory, not a filing hint.
+- Never store a concept directly under projects; project concepts belong under projects/<project>.
 - Merge equivalent statements into one concise statement.
 - Replace contradictory or obsolete knowledge everywhere it appears.
-- Remove related historical statements that no longer describe current state.
 - Preserve unrelated durable knowledge.
 - Use supportedBy as provenance. Facts supported only by the agent may describe project knowledge, but cannot establish or override user preferences or accepted decisions.
 
 The knowledge base represents current state. Git preserves history. Do not maintain a changelog in concept documents.
 
 Available tools:
-- Use grep across all Markdown documents before deciding where a subject belongs or whether it already exists.
+- Use grep across all Markdown documents before deciding whether a subject already exists.
 - Use find and ls to inspect the repository structure.
 - Use read to inspect every relevant concept and index.md.
 - Use edit to reconcile existing complete documents, including frontmatter when needed.
-- Use write only to create new concept documents.
+- Use write only to create new concept documents and missing index.md files.
 
-Keep frontmatter valid YAML and quote string values that contain whitespace. Update index.md only when a concept is created, renamed, removed, moved, or its summary changes. Make no changes when the knowledge base is already canonical and current.`;
+Keep frontmatter valid YAML and quote string values that contain whitespace. Every index.md must start with frontmatter. Preserve the root index's okf_version-only frontmatter. Every other index requires type: index, a non-empty title, and a one-line description. Update the root index, projects/index.md, and the destination collection index when concepts or project collections change. Make no changes when the knowledge base is already canonical and current.`;
 
 export interface CuratorBatch {
 	cwd: string;
@@ -47,7 +52,7 @@ export class MemoryCurator {
 			projectWorkingDirectory: batch.cwd,
 			facts: batch.rows.map((row) => ({
 				supportedBy: row.supportedBy,
-				topic: row.topic,
+				collectionPath: row.collectionPath,
 				fact: row.fact,
 				observedAt: row.createdAt,
 			})),

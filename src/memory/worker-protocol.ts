@@ -1,5 +1,5 @@
 import type { PiInvocation } from "../pi/invocation.ts";
-import type { MemoryConfig, MemorySender } from "./config.ts";
+import type { MemoryConfig, MemoryRoutingContext, MemorySender } from "./config.ts";
 import type {
 	ExtractableMemoryExchange,
 	ExtractedMemoryFact,
@@ -34,9 +34,9 @@ interface MemoryWorkerMethodMap {
 		params: { exchange: ExtractableMemoryExchange; facts: ExtractedMemoryFact[]; extractedAt: string };
 		result: bigint[];
 	};
-	"list-topics": {
-		params: null;
-		result: string[];
+	"get-routing-context": {
+		params: { cwd: string };
+		result: MemoryRoutingContext;
 	};
 	"log-error": {
 		params: Record<string, unknown>;
