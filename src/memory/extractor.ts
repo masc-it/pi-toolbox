@@ -1,11 +1,8 @@
-import { basename } from "node:path";
 import type { WorkflowModelProfile } from "../domain.ts";
 import type { WorkflowModelClient } from "../model/client.ts";
 import {
 	isMemoryCollectionPath,
 	isMemoryFactSupport,
-	MEMORY_GLOBAL_COLLECTIONS,
-	toMemoryCollectionSegment,
 	type MemoryCollectionPath,
 	type MemoryFactSupport,
 	type MemoryRoutingContext,
@@ -66,16 +63,15 @@ export interface MemoryExtractionExchange {
 }
 
 type ExtractorModelClient = Pick<WorkflowModelClient, "completeText">;
-type MemoryRoutingProvider = (cwd: string) => MemoryRoutingContext | Promise<MemoryRoutingContext>;
 
 export class MemoryExtractor {
-	constructor(
-		private readonly modelClient: ExtractorModelClient,
-		private readonly getRoutingContext: MemoryRoutingProvider = defaultRoutingContext,
-	) {}
+	constructor(private readonly modelClient: ExtractorModelClient) {}
 
-	async extract(exchange: MemoryExtractionExchange, signal: AbortSignal): Promise<ExtractedMemoryFact[]> {
-		const routing = await this.getRoutingContext(exchange.cwd);
+	async extract(
+		exchange: MemoryExtractionExchange,
+		routing: MemoryRoutingContext,
+		signal: AbortSignal,
+	): Promise<ExtractedMemoryFact[]> {
 		validateRoutingContext(routing);
 		const output = await this.modelClient.completeText({
 			profile: MEMORY_EXTRACTOR_PROFILE,
@@ -134,14 +130,6 @@ export function parseExtractorOutput(
 		}
 		return { supportedBy: item.supportedBy, collectionPath: item.collectionPath, fact: item.fact.trim() };
 	});
-}
-
-function defaultRoutingContext(cwd: string): MemoryRoutingContext {
-	const currentProjectCollection = `projects/${toMemoryCollectionSegment(basename(cwd))}`;
-	return {
-		currentProjectCollection,
-		availableCollections: [...MEMORY_GLOBAL_COLLECTIONS, currentProjectCollection].sort(),
-	};
 }
 
 function validateRoutingContext(routing: MemoryRoutingContext): void {

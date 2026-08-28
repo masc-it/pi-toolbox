@@ -1,14 +1,10 @@
 import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { WorkflowModelClient } from "../model/client.ts";
 import { getPiInvocation } from "../pi/invocation.ts";
-import { createMemoryConfig } from "./config.ts";
+import { createMemoryConfig, type MemoryRoutingContext } from "./config.ts";
 import { MemoryExtractor, toExtractionExchange } from "./extractor.ts";
-import type {
-	ExtractableMemoryExchange,
-	ExtractedMemoryFact,
-	NewMemoryExchange,
-	OpenMemoryExchange,
-} from "./queue.ts";
+import type { ExtractableMemoryExchange, ExtractedMemoryFact, NewMemoryExchange } from "./queue.ts";
+import type { MemoryExtractionWork } from "./worker-protocol.ts";
 import { MemoryWorkerClient } from "./worker-client.ts";
 
 interface CapturedUserMessage extends NewMemoryExchange {
@@ -16,14 +12,18 @@ interface CapturedUserMessage extends NewMemoryExchange {
 }
 
 interface MemoryFactExtractor {
-	extract(exchange: ReturnType<typeof toExtractionExchange>, signal: AbortSignal): Promise<ExtractedMemoryFact[]>;
+	extract(
+		exchange: ReturnType<typeof toExtractionExchange>,
+		routing: MemoryRoutingContext,
+		signal: AbortSignal,
+	): Promise<ExtractedMemoryFact[]>;
 }
 
 interface MemoryExchangeStore {
-	startExchange(exchange: NewMemoryExchange, userContent: string): Promise<OpenMemoryExchange>;
-	appendMessage(exchangeId: bigint, sentBy: "user" | "agent", content: string, createdAt: string): Promise<void>;
-	settleExchange(exchangeId: bigint, settledAt: string): Promise<void>;
-	nextUnextractedExchange(): Promise<ExtractableMemoryExchange | null>;
+	captureUser(exchange: NewMemoryExchange, content: string): Promise<void>;
+	captureAgent(content: string, createdAt: string): Promise<void>;
+	settleActiveExchange(settledAt: string): Promise<boolean>;
+	nextExtraction(): Promise<MemoryExtractionWork | null>;
 	completeExtraction(
 		exchange: ExtractableMemoryExchange,
 		facts: readonly ExtractedMemoryFact[],
@@ -35,7 +35,6 @@ interface MemoryExchangeStore {
 
 export class MemoryCaptureRuntime {
 	private readonly abortController = new AbortController();
-	private activeExchange: OpenMemoryExchange | undefined;
 	private flight: Promise<void> | null = null;
 	private wakeRequested = false;
 	private accepting = true;
@@ -47,73 +46,47 @@ export class MemoryCaptureRuntime {
 	) {}
 
 	async captureUserMessage(message: CapturedUserMessage): Promise<void> {
-		if (!this.accepting) {
-			return;
-		}
-
+		if (!this.accepting) return;
 		try {
-			if (!this.activeExchange) {
-				this.activeExchange = await this.store.startExchange(message, message.content);
-				return;
-			}
-			await this.store.appendMessage(this.activeExchange.id, "user", message.content, message.startedAt);
+			await this.store.captureUser(message, message.content);
 		} catch (error) {
-			await logCaptureFailure(this.store, "capture-user", message, error, this.activeExchange?.id);
+			await logCaptureFailure(this.store, "capture-user", error, message);
 		}
 	}
 
 	async captureAgentResponse(content: string, createdAt: string): Promise<void> {
-		if (!this.accepting || !this.activeExchange) {
-			return;
-		}
-
+		if (!this.accepting) return;
 		try {
-			await this.store.appendMessage(this.activeExchange.id, "agent", content, createdAt);
+			await this.store.captureAgent(content, createdAt);
 		} catch (error) {
-			await logCaptureFailure(this.store, "capture-agent", this.activeExchange, error, this.activeExchange.id);
+			await logCaptureFailure(this.store, "capture-agent", error);
 		}
 	}
 
 	async settleActiveExchange(settledAt: string): Promise<void> {
-		if (!this.activeExchange) {
-			return;
-		}
-		const exchange = this.activeExchange;
 		try {
-			await this.store.settleExchange(exchange.id, settledAt);
-			this.activeExchange = undefined;
-			this.wake();
+			if (await this.store.settleActiveExchange(settledAt)) this.wake();
 		} catch (error) {
-			await logCaptureFailure(this.store, "settle-exchange", exchange, error, exchange.id);
+			await logCaptureFailure(this.store, "settle-exchange", error);
 		}
 	}
 
 	wake(): void {
-		if (!this.accepting || this.failed) {
-			return;
-		}
+		if (!this.accepting || this.failed) return;
 		this.wakeRequested = true;
-		if (this.flight) {
-			return;
-		}
+		if (this.flight) return;
 
 		const flight = this.run();
 		this.flight = flight;
 		void flight.finally(() => {
-			if (this.flight !== flight) {
-				return;
-			}
+			if (this.flight !== flight) return;
 			this.flight = null;
-			if (this.wakeRequested && this.accepting && !this.failed) {
-				this.wake();
-			}
+			if (this.wakeRequested && this.accepting && !this.failed) this.wake();
 		});
 	}
 
 	async close(): Promise<void> {
-		if (!this.accepting) {
-			return;
-		}
+		if (!this.accepting) return;
 		await this.settleActiveExchange(new Date().toISOString());
 		this.accepting = false;
 		this.abortController.abort();
@@ -128,9 +101,7 @@ export class MemoryCaptureRuntime {
 				await this.drainUnextractedExchanges();
 			} while (this.wakeRequested && this.accepting);
 		} catch (error) {
-			if (!this.accepting && isAbortError(error)) {
-				return;
-			}
+			if (!this.accepting && isAbortError(error)) return;
 			this.failed = true;
 			await recordMemoryFailure(this.store, {
 				component: "memory",
@@ -142,12 +113,14 @@ export class MemoryCaptureRuntime {
 
 	private async drainUnextractedExchanges(): Promise<void> {
 		while (this.accepting) {
-			const exchange = await this.store.nextUnextractedExchange();
-			if (!exchange || !this.accepting) {
-				return;
-			}
-			const facts = await this.extractor.extract(toExtractionExchange(exchange), this.abortController.signal);
-			await this.store.completeExtraction(exchange, facts, new Date().toISOString());
+			const work = await this.store.nextExtraction();
+			if (!work || !this.accepting) return;
+			const facts = await this.extractor.extract(
+				toExtractionExchange(work.exchange),
+				work.routing,
+				this.abortController.signal,
+			);
+			await this.store.completeExtraction(work.exchange, facts, new Date().toISOString());
 		}
 	}
 }
@@ -164,11 +137,10 @@ export function registerMemory(pi: ExtensionAPI): void {
 				cwd: ctx.cwd,
 				piInvocation: getPiInvocation([]),
 			});
-			const extractor = new MemoryExtractor(
-				new WorkflowModelClient(ctx.modelRegistry),
-				(cwd) => worker.getRoutingContext(cwd),
+			runtime = new MemoryCaptureRuntime(
+				new MemoryExtractor(new WorkflowModelClient(ctx.modelRegistry)),
+				worker,
 			);
-			runtime = new MemoryCaptureRuntime(extractor, worker);
 			runtime.wake();
 		} catch {
 			runtime = undefined;
@@ -177,9 +149,7 @@ export function registerMemory(pi: ExtensionAPI): void {
 
 	pi.on("message_end", async (event, ctx) => {
 		const content = getConversationMessageText(event.message);
-		if (content.length === 0) {
-			return;
-		}
+		if (content.length === 0) return;
 		const createdAt = new Date(event.message.timestamp).toISOString();
 		if (event.message.role === "user") {
 			await runtime?.captureUserMessage({
@@ -207,12 +177,8 @@ export function registerMemory(pi: ExtensionAPI): void {
 }
 
 export function getConversationMessageText(message: AgentEndEvent["messages"][number]): string {
-	if (message.role !== "user" && message.role !== "assistant") {
-		return "";
-	}
-	if (typeof message.content === "string") {
-		return message.content.trim();
-	}
+	if (message.role !== "user" && message.role !== "assistant") return "";
+	if (typeof message.content === "string") return message.content.trim();
 	return message.content
 		.filter((part) => part.type === "text" && part.text.trim().length > 0)
 		.map((part) => part.type === "text" ? part.text.trim() : "")
@@ -222,16 +188,13 @@ export function getConversationMessageText(message: AgentEndEvent["messages"][nu
 async function logCaptureFailure(
 	store: Pick<MemoryExchangeStore, "logError">,
 	stage: "capture-user" | "capture-agent" | "settle-exchange",
-	exchange: Pick<NewMemoryExchange, "piSessionId" | "cwd">,
 	error: unknown,
-	exchangeId?: bigint,
+	exchange?: Pick<NewMemoryExchange, "piSessionId" | "cwd">,
 ): Promise<void> {
 	await recordMemoryFailure(store, {
 		component: "memory",
 		stage,
-		pi_session_id: exchange.piSessionId,
-		cwd: exchange.cwd,
-		...(exchangeId === undefined ? {} : { exchange_id: exchangeId.toString() }),
+		...(exchange ? { pi_session_id: exchange.piSessionId, cwd: exchange.cwd } : {}),
 		error: error instanceof Error ? error.message : String(error),
 	});
 }

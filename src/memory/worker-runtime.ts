@@ -1,15 +1,21 @@
-import { parentPort, workerData } from "node:worker_threads";
+import { MessagePort, parentPort, workerData } from "node:worker_threads";
 import { resolveMemoryRoutingContext } from "./collections.ts";
 import { MemoryConsumer } from "./consumer.ts";
 import { MemoryCurator } from "./curator.ts";
 import { recordMemoryError } from "./log.ts";
-import { MemoryQueue } from "./queue.ts";
+import { MemoryQueue, type OpenMemoryExchange } from "./queue.ts";
 import { MemoryRepository } from "./repository.ts";
-import type { MemoryWorkerConfig, MemoryWorkerRequest, MemoryWorkerResponse } from "./worker-protocol.ts";
+import type {
+	MemoryWorkerConfig,
+	MemoryWorkerRequest,
+	MemoryWorkerResponse,
+	MemoryWorkerStartupMessage,
+} from "./worker-protocol.ts";
 
 class MemoryWorkerRuntime {
 	private readonly queue: MemoryQueue;
 	private readonly consumer: MemoryConsumer | null;
+	private activeExchange: OpenMemoryExchange | null = null;
 	private closed = false;
 
 	constructor(private readonly config: MemoryWorkerConfig) {
@@ -40,54 +46,65 @@ class MemoryWorkerRuntime {
 		this.consumer = consumer;
 	}
 
-	startExchange(request: Extract<MemoryWorkerRequest, { method: "start-exchange" }>) {
+	handle(request: MemoryWorkerRequest): unknown | Promise<unknown> {
 		this.assertOpen();
-		return this.queue.startExchange(request.params.exchange, request.params.userContent);
-	}
-
-	appendMessage(request: Extract<MemoryWorkerRequest, { method: "append-message" }>): null {
-		this.assertOpen();
-		const { exchangeId, sentBy, content, createdAt } = request.params;
-		this.queue.appendMessage(exchangeId, sentBy, content, createdAt);
-		return null;
-	}
-
-	settleExchange(request: Extract<MemoryWorkerRequest, { method: "settle-exchange" }>): null {
-		this.assertOpen();
-		this.queue.settleExchange(request.params.exchangeId, request.params.settledAt);
-		return null;
-	}
-
-	nextUnextractedExchange() {
-		this.assertOpen();
-		return this.queue.nextUnextractedExchange();
-	}
-
-	completeExtraction(request: Extract<MemoryWorkerRequest, { method: "complete-extraction" }>) {
-		this.assertOpen();
-		const { exchange, facts, extractedAt } = request.params;
-		const ids = this.queue.completeExtraction(exchange, facts, extractedAt);
-		if (ids.length > 0) {
-			this.consumer?.wake();
+		switch (request.method) {
+			case "capture-user":
+				return this.captureUser(request.params.exchange, request.params.content);
+			case "capture-agent":
+				return this.captureAgent(request.params.content, request.params.createdAt);
+			case "settle-active-exchange":
+				return this.settleActiveExchange(request.params.settledAt);
+			case "next-extraction":
+				return this.nextExtraction();
+			case "complete-extraction": {
+				const { exchange, facts, extractedAt } = request.params;
+				const ids = this.queue.completeExtraction(exchange, facts, extractedAt);
+				if (ids.length > 0) this.consumer?.wake();
+				return ids;
+			}
+			case "log-error":
+				recordMemoryError(this.queue, request.params);
+				return null;
+			case "shutdown":
+				return this.close();
 		}
-		return ids;
 	}
 
-	getRoutingContext(request: Extract<MemoryWorkerRequest, { method: "get-routing-context" }>) {
-		this.assertOpen();
-		return resolveMemoryRoutingContext(this.config.knowledgeBaseDirectory, request.params.cwd);
-	}
-
-	logError(request: Extract<MemoryWorkerRequest, { method: "log-error" }>): null {
-		this.assertOpen();
-		recordMemoryError(this.queue, request.params);
+	private captureUser(exchange: Parameters<MemoryQueue["startExchange"]>[0], content: string): null {
+		if (!this.activeExchange) {
+			this.activeExchange = this.queue.startExchange(exchange, content);
+		} else {
+			this.queue.appendMessage(this.activeExchange.id, "user", content, exchange.startedAt);
+		}
 		return null;
 	}
 
-	async close(): Promise<null> {
-		if (this.closed) {
-			return null;
+	private captureAgent(content: string, createdAt: string): null {
+		if (this.activeExchange) {
+			this.queue.appendMessage(this.activeExchange.id, "agent", content, createdAt);
 		}
+		return null;
+	}
+
+	private settleActiveExchange(settledAt: string): boolean {
+		if (!this.activeExchange) return false;
+		this.queue.settleExchange(this.activeExchange.id, settledAt);
+		this.activeExchange = null;
+		return true;
+	}
+
+	private nextExtraction() {
+		const exchange = this.queue.nextUnextractedExchange();
+		if (!exchange) return null;
+		return {
+			exchange,
+			routing: resolveMemoryRoutingContext(this.config.knowledgeBaseDirectory, exchange.cwd),
+		};
+	}
+
+	private async close(): Promise<null> {
+		if (this.closed) return null;
 		this.closed = true;
 		if (this.consumer) {
 			await this.consumer.close();
@@ -98,9 +115,7 @@ class MemoryWorkerRuntime {
 	}
 
 	private assertOpen(): void {
-		if (this.closed) {
-			throw new Error("Memory worker runtime is closed");
-		}
+		if (this.closed) throw new Error("Memory worker runtime is closed");
 	}
 }
 
@@ -109,74 +124,47 @@ const port = requireParentPort(parentPort);
 let runtime: MemoryWorkerRuntime;
 try {
 	runtime = new MemoryWorkerRuntime(validateWorkerConfig(workerData));
-	post({ type: "ready" });
+	postStartup({ type: "ready" });
 } catch (error) {
-	post({ type: "startup-error", error: formatError(error) });
+	postStartup({ type: "startup-error", error: formatError(error) });
 	port.close();
 	throw error;
 }
 
+let requestChain = Promise.resolve();
 port.on("message", (value: unknown) => {
-	void handleRequest(value);
+	requestChain = requestChain.then(() => handleRequest(value));
 });
 
 async function handleRequest(value: unknown): Promise<void> {
-	if (!isMemoryWorkerRequest(value)) {
-		return;
-	}
-
+	if (!isMemoryWorkerRequest(value)) return;
+	const { replyPort } = value;
 	try {
-		let result: unknown;
-		switch (value.method) {
-			case "start-exchange":
-				result = runtime.startExchange(value);
-				break;
-			case "append-message":
-				result = runtime.appendMessage(value);
-				break;
-			case "settle-exchange":
-				result = runtime.settleExchange(value);
-				break;
-			case "next-unextracted-exchange":
-				result = runtime.nextUnextractedExchange();
-				break;
-			case "complete-extraction":
-				result = runtime.completeExtraction(value);
-				break;
-			case "get-routing-context":
-				result = runtime.getRoutingContext(value);
-				break;
-			case "log-error":
-				result = runtime.logError(value);
-				break;
-			case "shutdown":
-				result = await runtime.close();
-				break;
-		}
-		post({ type: "response", id: value.id, ok: true, result });
-		if (value.method === "shutdown") {
-			port.close();
-		}
+		const result = await runtime.handle(value);
+		postResponse(replyPort, { ok: true, result });
+		if (value.method === "shutdown") port.close();
 	} catch (error) {
-		post({ type: "response", id: value.id, ok: false, error: formatError(error) });
+		postResponse(replyPort, { ok: false, error: formatError(error) });
+	} finally {
+		replyPort.close();
 	}
 }
 
-function post(message: MemoryWorkerResponse): void {
+function postStartup(message: MemoryWorkerStartupMessage): void {
 	port.postMessage(message);
 }
 
+function postResponse(replyPort: MessagePort, message: MemoryWorkerResponse): void {
+	replyPort.postMessage(message);
+}
+
 function requireParentPort(value: typeof parentPort): NonNullable<typeof parentPort> {
-	if (!value) {
-		throw new Error("Memory worker requires a parent port");
-	}
+	if (!value) throw new Error("Memory worker requires a parent port");
 	return value;
 }
 
 function validateWorkerConfig(value: unknown): MemoryWorkerConfig {
-	if (!isRecord(value)) {
-		throw new Error("Memory worker configuration must be an object");
-	}
+	if (!isRecord(value)) throw new Error("Memory worker configuration must be an object");
 	const dataDirectory = requireNonEmptyString(value.dataDirectory, "dataDirectory");
 	const databasePath = requireNonEmptyString(value.databasePath, "databasePath");
 	const knowledgeBaseDirectory = requireNonEmptyString(value.knowledgeBaseDirectory, "knowledgeBaseDirectory");
@@ -187,9 +175,7 @@ function validateWorkerConfig(value: unknown): MemoryWorkerConfig {
 }
 
 function validatePiInvocation(value: unknown): MemoryWorkerConfig["piInvocation"] {
-	if (!isRecord(value)) {
-		throw new Error("Memory worker configuration has an invalid piInvocation");
-	}
+	if (!isRecord(value)) throw new Error("Memory worker configuration has an invalid piInvocation");
 	const command = requireNonEmptyString(value.command, "piInvocation.command");
 	if (!Array.isArray(value.args) || value.args.some((argument) => typeof argument !== "string")) {
 		throw new Error("Memory worker configuration has invalid piInvocation.args");
@@ -207,22 +193,18 @@ function requireNonEmptyString(value: unknown, key: string): string {
 function isMemoryWorkerRequest(value: unknown): value is MemoryWorkerRequest {
 	return (
 		isRecord(value) &&
-		value.type === "request" &&
-		typeof value.id === "number" &&
-		Number.isSafeInteger(value.id) &&
-		value.id > 0 &&
 		typeof value.method === "string" &&
 		[
-			"start-exchange",
-			"append-message",
-			"settle-exchange",
-			"next-unextracted-exchange",
+			"capture-user",
+			"capture-agent",
+			"settle-active-exchange",
+			"next-extraction",
 			"complete-extraction",
-			"get-routing-context",
 			"log-error",
 			"shutdown",
 		].includes(value.method) &&
-		"params" in value
+		"params" in value &&
+		value.replyPort instanceof MessagePort
 	);
 }
 

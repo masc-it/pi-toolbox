@@ -1,10 +1,10 @@
+import type { MessagePort } from "node:worker_threads";
 import type { PiInvocation } from "../pi/invocation.ts";
-import type { MemoryConfig, MemoryRoutingContext, MemorySender } from "./config.ts";
+import type { MemoryConfig, MemoryRoutingContext } from "./config.ts";
 import type {
 	ExtractableMemoryExchange,
 	ExtractedMemoryFact,
 	NewMemoryExchange,
-	OpenMemoryExchange,
 } from "./queue.ts";
 
 export interface MemoryWorkerConfig extends MemoryConfig {
@@ -13,30 +13,31 @@ export interface MemoryWorkerConfig extends MemoryConfig {
 	piInvocation: PiInvocation;
 }
 
+export interface MemoryExtractionWork {
+	exchange: ExtractableMemoryExchange;
+	routing: MemoryRoutingContext;
+}
+
 interface MemoryWorkerMethodMap {
-	"start-exchange": {
-		params: { exchange: NewMemoryExchange; userContent: string };
-		result: OpenMemoryExchange;
-	};
-	"append-message": {
-		params: { exchangeId: bigint; sentBy: MemorySender; content: string; createdAt: string };
+	"capture-user": {
+		params: { exchange: NewMemoryExchange; content: string };
 		result: null;
 	};
-	"settle-exchange": {
-		params: { exchangeId: bigint; settledAt: string };
+	"capture-agent": {
+		params: { content: string; createdAt: string };
 		result: null;
 	};
-	"next-unextracted-exchange": {
+	"settle-active-exchange": {
+		params: { settledAt: string };
+		result: boolean;
+	};
+	"next-extraction": {
 		params: null;
-		result: ExtractableMemoryExchange | null;
+		result: MemoryExtractionWork | null;
 	};
 	"complete-extraction": {
 		params: { exchange: ExtractableMemoryExchange; facts: ExtractedMemoryFact[]; extractedAt: string };
 		result: bigint[];
-	};
-	"get-routing-context": {
-		params: { cwd: string };
-		result: MemoryRoutingContext;
 	};
 	"log-error": {
 		params: Record<string, unknown>;
@@ -54,15 +55,16 @@ export type MemoryWorkerResult<M extends MemoryWorkerMethod> = MemoryWorkerMetho
 
 export type MemoryWorkerRequest = {
 	[M in MemoryWorkerMethod]: {
-		type: "request";
-		id: number;
 		method: M;
 		params: MemoryWorkerParams<M>;
+		replyPort: MessagePort;
 	};
 }[MemoryWorkerMethod];
 
-export type MemoryWorkerResponse =
+export type MemoryWorkerStartupMessage =
 	| { type: "ready" }
-	| { type: "startup-error"; error: string }
-	| { type: "response"; id: number; ok: true; result: unknown }
-	| { type: "response"; id: number; ok: false; error: string };
+	| { type: "startup-error"; error: string };
+
+export type MemoryWorkerResponse =
+	| { ok: true; result: unknown }
+	| { ok: false; error: string };

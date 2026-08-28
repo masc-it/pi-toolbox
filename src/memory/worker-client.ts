@@ -1,34 +1,26 @@
-import { Worker } from "node:worker_threads";
-import type { MemoryRoutingContext, MemorySender } from "./config.ts";
+import { MessageChannel, Worker } from "node:worker_threads";
+import type { MemoryRoutingContext } from "./config.ts";
 import type {
 	ExtractableMemoryExchange,
 	ExtractedMemoryFact,
 	NewMemoryExchange,
-	OpenMemoryExchange,
 } from "./queue.ts";
 import type {
+	MemoryExtractionWork,
 	MemoryWorkerConfig,
 	MemoryWorkerMethod,
 	MemoryWorkerParams,
-	MemoryWorkerRequest,
 	MemoryWorkerResponse,
 	MemoryWorkerResult,
+	MemoryWorkerStartupMessage,
 } from "./worker-protocol.ts";
 
 const REQUEST_TIMEOUT_MS = 30_000;
-
-interface PendingRequest {
-	resolve(value: unknown): void;
-	reject(error: Error): void;
-	timeout: NodeJS.Timeout;
-}
 
 export class MemoryWorkerClient {
 	private readonly worker: Worker;
 	private readonly startup: Promise<void>;
 	private readonly exit: Promise<number>;
-	private readonly pending = new Map<number, PendingRequest>();
-	private nextRequestId = 1;
 	private started = false;
 	private closing = false;
 	private closed = false;
@@ -46,37 +38,30 @@ export class MemoryWorkerClient {
 
 		this.worker = new Worker(new URL("./worker-entry.mjs", import.meta.url), { workerData: config });
 		this.exit = new Promise<number>((resolve) => this.worker.once("exit", resolve));
-		this.worker.on("message", (message: unknown) => this.handleMessage(message));
+		this.worker.on("message", (message: unknown) => this.handleStartupMessage(message));
 		this.worker.on("error", (error) => this.fail(error));
 		this.worker.on("exit", (code) => {
 			this.closed = true;
 			if (!this.started || !this.closing) {
 				this.fail(new Error(code === 0 ? "Memory worker exited unexpectedly" : `Memory worker exited with code ${code}`));
-				return;
 			}
-			this.rejectPending(new Error("Memory worker is closed"));
 		});
 	}
 
-	startExchange(exchange: NewMemoryExchange, userContent: string): Promise<OpenMemoryExchange> {
-		return this.request("start-exchange", { exchange, userContent });
+	async captureUser(exchange: NewMemoryExchange, content: string): Promise<void> {
+		await this.request("capture-user", { exchange, content });
 	}
 
-	async appendMessage(
-		exchangeId: bigint,
-		sentBy: MemorySender,
-		content: string,
-		createdAt: string,
-	): Promise<void> {
-		await this.request("append-message", { exchangeId, sentBy, content, createdAt });
+	async captureAgent(content: string, createdAt: string): Promise<void> {
+		await this.request("capture-agent", { content, createdAt });
 	}
 
-	async settleExchange(exchangeId: bigint, settledAt: string): Promise<void> {
-		await this.request("settle-exchange", { exchangeId, settledAt });
+	settleActiveExchange(settledAt: string): Promise<boolean> {
+		return this.request("settle-active-exchange", { settledAt });
 	}
 
-	nextUnextractedExchange(): Promise<ExtractableMemoryExchange | null> {
-		return this.request("next-unextracted-exchange", null);
+	nextExtraction(): Promise<MemoryExtractionWork | null> {
+		return this.request("next-extraction", null);
 	}
 
 	completeExtraction(
@@ -85,10 +70,6 @@ export class MemoryWorkerClient {
 		extractedAt: string,
 	): Promise<bigint[]> {
 		return this.request("complete-extraction", { exchange, facts: [...facts], extractedAt });
-	}
-
-	getRoutingContext(cwd: string): Promise<MemoryRoutingContext> {
-		return this.request("get-routing-context", { cwd });
 	}
 
 	async logError(entry: Record<string, unknown>): Promise<void> {
@@ -117,33 +98,45 @@ export class MemoryWorkerClient {
 		method: M,
 		params: MemoryWorkerParams<M>,
 	): Promise<MemoryWorkerResult<M>> {
-		const id = this.nextRequestId++;
-		const request = { type: "request", id, method, params } as MemoryWorkerRequest;
+		this.assertAvailableForSend();
+		const { port1, port2 } = new MessageChannel();
+
 		return new Promise<MemoryWorkerResult<M>>((resolve, reject) => {
+			let settled = false;
+			const finish = (callback: () => void) => {
+				if (settled) return;
+				settled = true;
+				clearTimeout(timeout);
+				port1.removeAllListeners();
+				port1.close();
+				callback();
+			};
 			const timeout = setTimeout(() => {
-				if (!this.pending.delete(id)) {
-					return;
-				}
 				const error = new Error(`Memory worker request timed out: ${method}`);
-				reject(error);
+				finish(() => reject(error));
 				this.fail(error);
 				void this.worker.terminate();
 			}, REQUEST_TIMEOUT_MS);
-			this.pending.set(id, {
-				resolve: (value) => resolve(value as MemoryWorkerResult<M>),
-				reject,
-				timeout,
-			});
-			try {
-				this.assertAvailableForSend();
-				this.worker.postMessage(request);
-			} catch (error) {
-				const pending = this.pending.get(id);
-				if (pending) {
-					clearTimeout(pending.timeout);
-					this.pending.delete(id);
+
+			port1.once("message", (message: unknown) => {
+				if (!isMemoryWorkerResponse(message)) {
+					finish(() => reject(new Error("Memory worker returned an invalid response")));
+					return;
 				}
-				reject(error instanceof Error ? error : new Error(String(error)));
+				if (message.ok) {
+					finish(() => resolve(message.result as MemoryWorkerResult<M>));
+				} else {
+					finish(() => reject(new Error(message.error)));
+				}
+			});
+			port1.once("close", () => {
+				finish(() => reject(this.terminalError ?? new Error("Memory worker closed before replying")));
+			});
+
+			try {
+				this.worker.postMessage({ method, params, replyPort: port2 }, [port2]);
+			} catch (error) {
+				finish(() => reject(error instanceof Error ? error : new Error(String(error))));
 			}
 		});
 	}
@@ -151,9 +144,7 @@ export class MemoryWorkerClient {
 	private async closeWorker(): Promise<void> {
 		let shutdownSucceeded = false;
 		try {
-			if (this.terminalError || this.closed) {
-				return;
-			}
+			if (this.terminalError || this.closed) return;
 			await this.startup;
 			await this.sendRequest("shutdown", null);
 			shutdownSucceeded = true;
@@ -166,13 +157,12 @@ export class MemoryWorkerClient {
 			} else {
 				await this.worker.terminate();
 			}
-			this.rejectPending(new Error("Memory worker is closed"));
 		}
 	}
 
-	private handleMessage(message: unknown): void {
-		if (!isMemoryWorkerResponse(message)) {
-			this.fail(new Error("Memory worker returned an invalid response"));
+	private handleStartupMessage(message: unknown): void {
+		if (!isMemoryWorkerStartupMessage(message)) {
+			this.fail(new Error("Memory worker returned an invalid startup message"));
 			return;
 		}
 		if (message.type === "ready") {
@@ -180,73 +170,35 @@ export class MemoryWorkerClient {
 			this.resolveStartup();
 			return;
 		}
-		if (message.type === "startup-error") {
-			this.fail(new Error(message.error));
-			return;
-		}
-
-		const pending = this.pending.get(message.id);
-		if (!pending) {
-			return;
-		}
-		clearTimeout(pending.timeout);
-		this.pending.delete(message.id);
-		if (message.ok) {
-			pending.resolve(message.result);
-		} else {
-			pending.reject(new Error(message.error));
-		}
+		this.fail(new Error(message.error));
 	}
 
 	private fail(error: Error): void {
-		if (!this.terminalError) {
-			this.terminalError = error;
-		}
+		if (!this.terminalError) this.terminalError = error;
 		this.closed = true;
 		this.rejectStartup(this.terminalError);
-		this.rejectPending(this.terminalError);
 	}
 
 	private assertAvailable(): void {
-		if (this.terminalError) {
-			throw this.terminalError;
-		}
-		if (this.closing || this.closed) {
-			throw new Error("Memory worker is closed");
-		}
+		if (this.terminalError) throw this.terminalError;
+		if (this.closing || this.closed) throw new Error("Memory worker is closed");
 	}
 
 	private assertAvailableForSend(): void {
-		if (this.terminalError) {
-			throw this.terminalError;
-		}
-		if (this.closed) {
-			throw new Error("Memory worker is closed");
-		}
-	}
-
-	private rejectPending(error: Error): void {
-		for (const request of this.pending.values()) {
-			clearTimeout(request.timeout);
-			request.reject(error);
-		}
-		this.pending.clear();
+		if (this.terminalError) throw this.terminalError;
+		if (this.closed) throw new Error("Memory worker is closed");
 	}
 }
 
+function isMemoryWorkerStartupMessage(value: unknown): value is MemoryWorkerStartupMessage {
+	return isRecord(value) && (
+		value.type === "ready" ||
+		(value.type === "startup-error" && typeof value.error === "string")
+	);
+}
+
 function isMemoryWorkerResponse(value: unknown): value is MemoryWorkerResponse {
-	if (!isRecord(value) || typeof value.type !== "string") {
-		return false;
-	}
-	if (value.type === "ready") {
-		return true;
-	}
-	if (value.type === "startup-error") {
-		return typeof value.error === "string";
-	}
-	if (value.type !== "response" || typeof value.id !== "number" || typeof value.ok !== "boolean") {
-		return false;
-	}
+	if (!isRecord(value) || typeof value.ok !== "boolean") return false;
 	return value.ok ? "result" in value : typeof value.error === "string";
 }
 

@@ -1,10 +1,8 @@
 import { stat } from "node:fs/promises";
-import { spawn, type ChildProcessByStdio } from "node:child_process";
-import type { Readable } from "node:stream";
 import { fileURLToPath } from "node:url";
+import { runProcess } from "../process/runner.ts";
 
 const MAX_OUTPUT_BYTES = 50 * 1024;
-const KILL_DELAY_MS = 5_000;
 const ANALYZER_PATH = fileURLToPath(new URL("../../scripts/python_complexity.py", import.meta.url));
 const PROMPT_PREFIX =
 	"Propose how to reduce the code complexity in the highest-offending Python file shown below. Remind of our coding principles.\n\n";
@@ -21,9 +19,7 @@ export class ComplexityCancelledError extends Error {
 }
 
 export async function analyzeRepository(cwd: string, signal: AbortSignal): Promise<ComplexityResult> {
-	if (signal.aborted) {
-		throw new ComplexityCancelledError();
-	}
+	if (signal.aborted) throw new ComplexityCancelledError();
 	await assertAnalyzerExists();
 	return runAnalyzer(cwd, signal);
 }
@@ -35,9 +31,7 @@ export function buildComplexityPrompt(report: string): string {
 async function assertAnalyzerExists(): Promise<void> {
 	try {
 		const details = await stat(ANALYZER_PATH);
-		if (!details.isFile()) {
-			throw new Error("path is not a file");
-		}
+		if (!details.isFile()) throw new Error("path is not a file");
 	} catch (error) {
 		throw new Error(
 			`Bundled complexity analyzer is missing at ${ANALYZER_PATH}: ${error instanceof Error ? error.message : String(error)}`,
@@ -45,105 +39,36 @@ async function assertAnalyzerExists(): Promise<void> {
 	}
 }
 
-function runAnalyzer(cwd: string, signal: AbortSignal): Promise<ComplexityResult> {
-	return new Promise((resolve, reject) => {
-		let child: ChildProcessByStdio<null, Readable, Readable>;
-		try {
-			child = spawn("uv", ["run", ANALYZER_PATH, "--repo-root", cwd], {
-				shell: false,
-				stdio: ["ignore", "pipe", "pipe"],
-			});
-		} catch (error) {
-			reject(spawnError(error));
-			return;
-		}
-
-		const stdoutChunks: Buffer[] = [];
-		const stderrChunks: Buffer[] = [];
-		let stdoutBytes = 0;
-		let stderrBytes = 0;
-		let stderrTruncated = false;
-		let terminalError: Error | null = null;
-		let killTimer: NodeJS.Timeout | null = null;
-		let settled = false;
-
-		const cleanup = () => {
-			signal.removeEventListener("abort", abort);
-			if (killTimer) {
-				clearTimeout(killTimer);
-				killTimer = null;
-			}
-		};
-		const settleError = (error: Error) => {
-			if (settled) return;
-			settled = true;
-			cleanup();
-			reject(error);
-		};
-		const terminate = (error: Error) => {
-			if (terminalError) return;
-			terminalError = error;
-			if (child.exitCode !== null || child.signalCode !== null) return;
-			child.kill("SIGTERM");
-			killTimer = setTimeout(() => {
-				if (child.exitCode === null && child.signalCode === null) {
-					child.kill("SIGKILL");
-				}
-			}, KILL_DELAY_MS);
-		};
-		const abort = () => terminate(new ComplexityCancelledError());
-
-		child.stdout.on("data", (chunk: Buffer) => {
-			stdoutBytes += chunk.length;
-			if (stdoutBytes > MAX_OUTPUT_BYTES) {
-				terminate(new Error("Complexity analyzer output exceeded 50 KB"));
-				return;
-			}
-			stdoutChunks.push(chunk);
+async function runAnalyzer(cwd: string, signal: AbortSignal): Promise<ComplexityResult> {
+	const outputLimitError = new Error("Complexity analyzer output exceeded 50 KB");
+	let result;
+	try {
+		result = await runProcess({
+			invocation: { command: "uv", args: ["run", ANALYZER_PATH, "--repo-root", cwd] },
+			cwd,
+			signal,
+			abortError: () => new ComplexityCancelledError(),
+			maxStdoutBytes: MAX_OUTPUT_BYTES,
+			stdoutLimitError: () => outputLimitError,
+			maxStderrBytes: MAX_OUTPUT_BYTES,
 		});
-		child.stderr.on("data", (chunk: Buffer) => {
-			const remaining = MAX_OUTPUT_BYTES - stderrBytes;
-			if (remaining <= 0) {
-				stderrTruncated = true;
-				return;
-			}
-			const kept = chunk.subarray(0, remaining);
-			stderrChunks.push(kept);
-			stderrBytes += kept.length;
-			stderrTruncated ||= kept.length < chunk.length;
-		});
-		child.once("error", (error) => settleError(spawnError(error)));
-		child.once("close", (code, processSignal) => {
-			if (settled) return;
-			if (terminalError) {
-				settleError(terminalError);
-				return;
-			}
+	} catch (error) {
+		if (error instanceof ComplexityCancelledError || error === outputLimitError) throw error;
+		throw spawnError(error);
+	}
 
-			const stderr = Buffer.concat(stderrChunks).toString("utf8").trim();
-			const stderrDetails = stderr
-				? ` ${stderr}${stderrTruncated ? " [standard error truncated]" : ""}`
-				: stderrTruncated
-					? " Standard error was truncated."
-					: "";
-			if (code !== 0) {
-				settleError(new Error(formatExitError(code, processSignal, stderrDetails)));
-				return;
-			}
+	const stderrDetails = result.stderr
+		? ` ${result.stderr}${result.stderrTruncated ? " [standard error truncated]" : ""}`
+		: result.stderrTruncated
+			? " Standard error was truncated."
+			: "";
+	if (result.code !== 0) {
+		throw new Error(formatExitError(result.code, result.signal, stderrDetails));
+	}
 
-			const report = Buffer.concat(stdoutChunks).toString("utf8");
-			if (report.trim().length === 0) {
-				settleError(new Error("Complexity analyzer returned empty output"));
-				return;
-			}
-			settled = true;
-			cleanup();
-			resolve({ report });
-		});
-
-		signal.addEventListener("abort", abort, { once: true });
-		if (signal.aborted) abort();
-	});
+	const report = result.stdout.toString("utf8");
+	if (report.trim().length === 0) throw new Error("Complexity analyzer returned empty output");
+	return { report };
 }
 
 function spawnError(error: unknown): Error {
