@@ -9,7 +9,7 @@ Memory keeps a current knowledge base about the user and their work. It runs in 
 
 The knowledge base lives at `~/work-memory`. It is a Git repository that follows Open Knowledge Format (OKF) v0.2. Memory initializes the repository, root index, and topic directories when the path does not exist.
 
-Memory stores only explicit facts extracted from user or agent messages.
+Memory stores only durable facts extracted from complete conversation exchanges. An exchange contains the user messages and successful agent responses produced before Pi becomes fully settled.
 
 ## Knowledge base
 
@@ -49,7 +49,7 @@ tags: [<topic>, <optional tags>]
 
 ## Facts
 
-A fact is one direct statement extracted from a conversation event. It must be understandable on its own.
+A fact is one durable statement extracted from a settled conversation exchange. It must be understandable on its own and identify whether it is supported by the user, the agent, or both.
 
 Examples:
 
@@ -57,51 +57,60 @@ Examples:
 - `The user prefers simple technical English in documentation.`
 - `The Memory knowledge base is stored at ~/work-memory.`
 
-Instructions can contain facts about a project or workflow. Feedback can contain facts about user preferences. The extractor separates those facts from the action requested in the message.
+Instructions can contain facts about a project or workflow. Feedback can contain facts about user preferences. Agent explanations can contain durable architecture, behavior, constraints, workflows, terminology, and gotchas. The extractor uses the complete exchange to separate those facts from requests, advice, execution narration, and verification evidence.
 
-`sent_by` identifies who sent the message:
+`supported_by` records the evidence for each extracted fact:
 
-- `user`: a user submission.
-- `agent`: the end of an agent run.
+- `user`: directly supported by user content.
+- `agent`: directly supported by agent content.
+- `both`: directly supported by both roles.
 
 ## SQLite storage
 
-The database is stored under the Pi Toolbox data directory, outside the knowledge-base repository. It contains the original messages and the fact queue. SQLite foreign-key enforcement is enabled for every connection.
+The database is stored under the Pi Toolbox data directory, outside the knowledge-base repository. It contains the original messages and the fact queue. SQLite foreign-key enforcement is enabled for every connection. The exchange schema is a clean break: a legacy unversioned Memory database is dropped and recreated on the first startup instead of being migrated.
 
-### Original messages
+### Conversation exchanges
 
-Every event is stored before extraction starts. `content` contains the original text passed to the extractor. Messages are retained indefinitely so every extraction input remains available for debugging.
+A finalized user `message_end` opens an exchange. Additional user messages and successful terminal agent responses are appended from the same authoritative event stream in order. This includes steering and queued follow-ups. `agent_settled` closes the exchange after retries, compaction retries, steering, and queued follow-ups have finished.
 
 ```sql
-CREATE TABLE memory_messages (
+CREATE TABLE memory_exchanges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pi_session_id TEXT NOT NULL,
     cwd TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    settled_at TEXT,
+    extracted_at TEXT
+) STRICT;
+
+CREATE TABLE memory_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exchange_id INTEGER NOT NULL
+        REFERENCES memory_exchanges (id),
+    position INTEGER NOT NULL,
     sent_by TEXT NOT NULL
         CHECK (sent_by IN ('user', 'agent')),
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE (exchange_id, position)
 ) STRICT;
-
-CREATE INDEX memory_messages_session_idx
-ON memory_messages (pi_session_id, id);
 ```
 
-A message remains stored when extraction produces no facts or fails. The table has no extraction status field.
+Settled exchanges with no `extracted_at` value are retried after a later wake or session start. Completing extraction and inserting its facts happen in one transaction. An empty extraction still sets `extracted_at`.
 
 ### Fact queue
 
-The queue separates fact extraction from knowledge-base updates. Extractors can finish asynchronously while one curator updates the files at a time. Every fact references its original message.
+The queue separates exchange extraction from knowledge-base updates. Extraction runs once per settled exchange while one curator updates the files at a time. Every fact references its complete source exchange.
 
 ```sql
 CREATE TABLE memory_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id INTEGER NOT NULL
-        REFERENCES memory_messages (id),
+    exchange_id INTEGER NOT NULL
+        REFERENCES memory_exchanges (id),
     pi_session_id TEXT NOT NULL,
     cwd TEXT NOT NULL,
-    sent_by TEXT NOT NULL
-        CHECK (sent_by IN ('user', 'agent')),
+    supported_by TEXT NOT NULL
+        CHECK (supported_by IN ('user', 'agent', 'both')),
     topic TEXT NOT NULL,
     fact TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -115,7 +124,7 @@ Processed rows remain in the table with `processed_at` set. They can be inspecte
 
 ### Queue indices
 
-The common queries find the oldest pending fact, load pending facts for one working directory, and trace facts to their original message.
+The common queries find the oldest unextracted exchange, load pending facts for one working directory, and trace facts to their source exchange.
 
 ```sql
 CREATE INDEX memory_queue_pending_fifo_idx
@@ -126,8 +135,8 @@ CREATE INDEX memory_queue_pending_cwd_idx
 ON memory_queue (cwd, id)
 WHERE processed_at IS NULL;
 
-CREATE INDEX memory_queue_message_idx
-ON memory_queue (message_id, id);
+CREATE INDEX memory_queue_exchange_idx
+ON memory_queue (exchange_id, id);
 ```
 
 ## Agents
@@ -138,41 +147,43 @@ Memory uses two isolated agent roles with `openai-codex/gpt-5.6-luna`.
 
 Thinking effort: `none` (`off` in the current Pi API).
 
-The extractor receives one stored message and returns a validated list of facts. For each fact it:
+The extractor receives one settled exchange and returns a validated list of durable facts. It uses the user messages and successful agent responses together to distinguish explanations, implementations, advice, verification, preferences, and decisions.
 
-1. Checks that the statement is explicit.
-2. Assigns an existing topic or proposes a new one.
-3. Writes one queue row linked to the original message, with the Pi session, working directory, sender, and creation time.
+For each fact it:
 
-An event with no durable facts produces no queue rows. Its original message remains stored.
+1. Checks that the statement is directly supported by the exchange.
+2. Records whether the supporting content came from the user, agent, or both.
+3. Assigns an existing topic or proposes a new one.
+4. Writes one queue row linked to the complete exchange.
 
-1 event -> [0-N] facts.
+An exchange with no durable facts produces no queue rows. The exchange remains stored and is marked extracted.
+
+1 settled exchange -> [0-N] facts.
 
 #### Extractor prompt
 
 ```text
-You extract durable facts from a conversation message, sent either by the user or a coding agent.
+You extract durable current knowledge from a complete conversation exchange between a user and a coding agent.
 
-Rules:
-- Extract only facts stated directly in the event.
-- Ignore requests and actions unless they also state a fact.
-- Write each fact as one clear, self-contained sentence, using simplified english.
-- Assign each fact exactly one available topic when applicable.
-- If no topic applies, propose a concise lowercase kebab-case topic.
-- Use the working directory only to name a project mentioned in the event. Never extract the directory itself as a fact.
-- Return JSON only. Return an empty facts list when there are no facts.
+First identify the exchange purpose:
+- Explanations may establish stable project knowledge.
+- Implementations may establish a durable resulting state.
+- Advice and design exploration remain proposals unless the user accepts them.
+- Verification results are transient and are not stored.
+- Explicit durable user preferences, decisions, conventions, and constraints are stored.
+
+A request does not prove that the requested state exists. Ignore execution narration, task progress, commit hashes, generated artifact details, temporary local state, and facts that only say an action happened. Agent statements cannot establish user preferences or accepted decisions.
+
+Emit one canonical fact when both roles repeat the same information. Preserve exact identifiers, qualifiers, scope, and negation. Set supportedBy to user, agent, or both. Assign one available topic, or propose a concise lowercase kebab-case topic when none applies. Return JSON only and use an empty facts list when there is no durable knowledge.
 
 Available topics:
 {{memory_topics}}
 
 Output:
-{"facts":[{"topic":"projects","fact":"Uses TypeScript."}]}
+{"facts":[{"supportedBy":"agent","topic":"projects","fact":"OPM V2 requests bypass the VLM worker."}]}
 
 Working directory: {{cwd}}
-Sent by: {{sent_by}}
-
-Event:
-{{content}}
+Conversation exchange: {{ordered_messages}}
 ```
 
 ### Curator
@@ -196,6 +207,7 @@ For each fact:
 - Replace older knowledge when a newer fact contradicts it.
 - Preserve unrelated current knowledge.
 - Store it under its assigned topic in the clearest concept document.
+- Use supportedBy as provenance. Facts supported only by the agent may describe project knowledge, but cannot establish or override user preferences or accepted decisions.
 
 Available tools:
 - Use find and ls to locate relevant concepts.
@@ -210,14 +222,17 @@ The initial user message contains only the JSON batch payload: `projectWorkingDi
 
 ## Event flow
 
-Memory runs after every user submission and on every `agent_end` event.
+Memory consumes finalized `message_end` events for user messages and successful terminal agent responses, preserving their order in one open exchange. It closes the exchange on `agent_settled`, the boundary where no automatic retry, compaction retry, or queued continuation remains.
 
 ```text
-Pi event
-  -> insert original message into SQLite
-  -> extractor agent
-  -> validate explicit facts
-  -> insert linked facts into SQLite
+message_end
+  -> open or extend exchange
+  -> store finalized user or successful terminal agent message
+
+agent_settled
+  -> settle exchange
+  -> extractor agent reads all ordered messages
+  -> atomically insert validated facts and set extracted_at
   -> wake queue consumer
 
 Queue consumer
@@ -228,7 +243,7 @@ Queue consumer
   -> set processed_at
 ```
 
-The local message insert completes before the hook returns. Extraction runs in the background without delaying the main coding agent. A session start also wakes the consumer so pending facts survive a previous interruption.
+The local message insert completes before the `message_end` hook returns. Extraction runs in the background after settlement without delaying the main coding agent. A session start retries settled, unextracted exchanges and wakes the curator consumer. Session shutdown settles any remaining open exchange from the messages available at that point.
 
 ## Batch consumption
 
@@ -262,7 +277,7 @@ A retry is idempotent. If files already contain the facts, the curator performs 
 
 ## Failure handling
 
-Memory failures do not fail the user's main agent turn. Errors are stored in the SQLite `logs` table with `id`, `msg`, and `created_at`; contextual fields are serialized in `msg`. A stored original message remains available when extraction fails.
+Memory failures do not fail the user's main agent turn. Errors are stored in the SQLite `logs` table with `id`, `msg`, and `created_at`; contextual fields are serialized in `msg`. An extraction failure leaves the settled exchange without `extracted_at`, so a later session can retry it.
 
 Boundary validation is strict:
 
@@ -274,9 +289,9 @@ Boundary validation is strict:
 
 ## MVP features
 
-- **Automatic capture:** Memory stores user submissions and completed agent runs, then extracts from them in the background.
-- **Inspectable inputs:** Original messages are retained indefinitely and linked to their extracted facts.
-- **Explicit knowledge:** It stores direct facts under injected topics, allows new topics when needed, and rejects inference.
+- **Exchange capture:** Memory stores ordered user and successful agent messages, then extracts once after Pi is fully settled.
+- **Inspectable inputs:** Original messages remain grouped under the exchange that supports each extracted fact.
+- **Durable knowledge:** It stores directly supported explanations, resulting states, preferences, decisions, conventions, constraints, and gotchas while rejecting transient process evidence.
 - **Current-state curation:** New facts update OKF concepts, duplicates are ignored, and newer contradictions replace older values.
 - **Project-aware processing:** Facts are queued durably and curated in serialized batches for one working directory.
 - **Recoverable operation:** Successful file changes are committed to Git.
@@ -307,25 +322,28 @@ QA checkpoint:
 
 Status: done
 
-Connect the lightweight extractor to user submissions and `agent_end` without blocking the main agent.
+Connect the lightweight extractor to complete conversation exchanges without blocking the main agent.
 
 Tasks:
 
-- Status: done - Define the extractor prompt and validated output shape.
+- Status: done - Open and extend exchanges from finalized user `message_end` events.
+- Status: done - Append successful terminal agent `message_end` events without extracting yet.
+- Status: done - Settle exchanges on `agent_settled` and extract once from all ordered messages.
+- Status: done - Define the exchange-aware extractor prompt, `supportedBy` provenance, and validated output shape.
 - Status: done - Run the extractor with `gpt-5.6-luna` and no thinking.
-- Status: done - Register both Pi lifecycle handlers.
-- Status: done - Persist every original message before extraction.
-- Status: done - Link each extracted fact to its original message.
+- Status: done - Complete extraction and enqueue facts in one transaction.
+- Status: done - Retry settled, unextracted exchanges after session start.
 - Status: done - Wake the consumer after facts are queued.
 
 QA checkpoint:
 
-- Submit instructions containing project facts and requested actions.
-- Submit feedback containing an explicit preference.
-- Confirm requests without durable facts store a message and create no queue rows.
-- Confirm indirect or inferred statements are not queued.
-- Force extraction failure and confirm the original message remains stored.
-- Confirm both senders are recorded and every fact links to its original message.
+- Ask for an explanation and confirm stable agent-supported project facts are queued.
+- Ask for design advice and confirm unaccepted proposals are not queued as current facts.
+- Complete an implementation and confirm only the durable resulting state is queued.
+- Confirm tests, metrics, commit hashes, and completion narration are rejected.
+- Submit feedback containing an explicit preference and confirm it is user-supported.
+- Exercise retries, aborts, steering, and queued follow-ups and inspect the ordered exchange.
+- Force extraction failure and confirm the settled exchange remains retryable.
 
 ### Phase 3: Curation and commits
 

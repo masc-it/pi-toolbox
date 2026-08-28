@@ -3,26 +3,47 @@ import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import {
 	MEMORY_BATCH_MAX_FACTS,
+	isMemoryFactSupport,
 	isMemorySender,
 	isMemoryTopic,
+	type MemoryFactSupport,
 	type MemorySender,
 	type MemoryTopic,
 } from "./config.ts";
 import { canonicalizeWorkingDirectory } from "./paths.ts";
 
+const SCHEMA_VERSION = 1;
+
 const SCHEMA = `
-CREATE TABLE IF NOT EXISTS memory_messages (
+CREATE TABLE IF NOT EXISTS memory_exchanges (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
     pi_session_id TEXT NOT NULL,
     cwd TEXT NOT NULL,
+    started_at TEXT NOT NULL,
+    settled_at TEXT,
+    extracted_at TEXT,
+    CHECK (extracted_at IS NULL OR settled_at IS NOT NULL)
+) STRICT;
+
+CREATE INDEX IF NOT EXISTS memory_exchanges_pending_extraction_idx
+ON memory_exchanges (id)
+WHERE settled_at IS NOT NULL AND extracted_at IS NULL;
+
+CREATE TABLE IF NOT EXISTS memory_messages (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    exchange_id INTEGER NOT NULL
+        REFERENCES memory_exchanges (id),
+    position INTEGER NOT NULL
+        CHECK (position >= 0),
     sent_by TEXT NOT NULL
         CHECK (sent_by IN ('user', 'agent')),
     content TEXT NOT NULL,
-    created_at TEXT NOT NULL
+    created_at TEXT NOT NULL,
+    UNIQUE (exchange_id, position)
 ) STRICT;
 
-CREATE INDEX IF NOT EXISTS memory_messages_session_idx
-ON memory_messages (pi_session_id, id);
+CREATE INDEX IF NOT EXISTS memory_messages_exchange_idx
+ON memory_messages (exchange_id, position);
 
 CREATE TABLE IF NOT EXISTS logs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -32,12 +53,12 @@ CREATE TABLE IF NOT EXISTS logs (
 
 CREATE TABLE IF NOT EXISTS memory_queue (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
-    message_id INTEGER NOT NULL
-        REFERENCES memory_messages (id),
+    exchange_id INTEGER NOT NULL
+        REFERENCES memory_exchanges (id),
     pi_session_id TEXT NOT NULL,
     cwd TEXT NOT NULL,
-    sent_by TEXT NOT NULL
-        CHECK (sent_by IN ('user', 'agent')),
+    supported_by TEXT NOT NULL
+        CHECK (supported_by IN ('user', 'agent', 'both')),
     topic TEXT NOT NULL,
     fact TEXT NOT NULL,
     created_at TEXT NOT NULL,
@@ -52,33 +73,52 @@ CREATE INDEX IF NOT EXISTS memory_queue_pending_cwd_idx
 ON memory_queue (cwd, id)
 WHERE processed_at IS NULL;
 
-CREATE INDEX IF NOT EXISTS memory_queue_message_idx
-ON memory_queue (message_id, id);
+CREATE INDEX IF NOT EXISTS memory_queue_exchange_idx
+ON memory_queue (exchange_id, id);
 `;
 
-export interface NewMemoryMessage {
+const DROP_LEGACY_SCHEMA = `
+DROP TABLE IF EXISTS memory_queue;
+DROP TABLE IF EXISTS memory_messages;
+DROP TABLE IF EXISTS memory_exchanges;
+DROP TABLE IF EXISTS logs;
+`;
+
+export interface NewMemoryExchange {
 	piSessionId: string;
 	cwd: string;
+	startedAt: string;
+}
+
+export interface OpenMemoryExchange extends NewMemoryExchange {
+	id: bigint;
+}
+
+export interface MemoryExchangeMessage {
+	id: bigint;
+	exchangeId: bigint;
+	position: number;
 	sentBy: MemorySender;
 	content: string;
 	createdAt: string;
 }
 
-export interface StoredMemoryMessage extends NewMemoryMessage {
-	id: bigint;
+export interface ExtractableMemoryExchange extends OpenMemoryExchange {
+	settledAt: string;
+	messages: MemoryExchangeMessage[];
 }
 
 export interface ExtractedMemoryFact {
+	supportedBy: MemoryFactSupport;
 	topic: MemoryTopic;
 	fact: string;
 }
 
 export interface MemoryQueueRow extends ExtractedMemoryFact {
 	id: bigint;
-	messageId: bigint;
+	exchangeId: bigint;
 	piSessionId: string;
 	cwd: string;
-	sentBy: MemorySender;
 	createdAt: string;
 	processedAt: string | null;
 }
@@ -88,12 +128,29 @@ export interface PendingMemoryBatch {
 	rows: MemoryQueueRow[];
 }
 
-interface DatabaseQueueRow {
+interface DatabaseExchangeRow {
 	id: bigint;
-	message_id: bigint;
 	pi_session_id: string;
 	cwd: string;
+	started_at: string;
+	settled_at: string;
+}
+
+interface DatabaseMessageRow {
+	id: bigint;
+	exchange_id: bigint;
+	position: bigint;
 	sent_by: string;
+	content: string;
+	created_at: string;
+}
+
+interface DatabaseQueueRow {
+	id: bigint;
+	exchange_id: bigint;
+	pi_session_id: string;
+	cwd: string;
+	supported_by: string;
 	topic: string;
 	fact: string;
 	created_at: string;
@@ -102,7 +159,12 @@ interface DatabaseQueueRow {
 
 export class MemoryQueue {
 	private readonly database: Database.Database;
+	private readonly insertExchangeStatement: Database.Statement;
 	private readonly insertMessageStatement: Database.Statement;
+	private readonly settleExchangeStatement: Database.Statement;
+	private readonly oldestUnextractedExchangeStatement: Database.Statement;
+	private readonly exchangeMessagesStatement: Database.Statement;
+	private readonly markExtractedStatement: Database.Statement;
 	private readonly insertFactStatement: Database.Statement;
 	private readonly insertLogStatement: Database.Statement;
 	private readonly oldestPendingCwdStatement: Database.Statement;
@@ -117,18 +179,51 @@ export class MemoryQueue {
 		this.database.pragma("foreign_keys = ON");
 		this.database.pragma("journal_mode = WAL");
 		this.database.pragma("busy_timeout = 5000");
-		this.database.exec(SCHEMA);
+		initializeSchema(this.database);
 		if (!databaseExisted) {
 			chmodSync(path, 0o600);
 		}
 
+		this.insertExchangeStatement = this.database.prepare(`
+			INSERT INTO memory_exchanges (pi_session_id, cwd, started_at)
+			VALUES (@piSessionId, @cwd, @startedAt)
+		`);
 		this.insertMessageStatement = this.database.prepare(`
-			INSERT INTO memory_messages (pi_session_id, cwd, sent_by, content, created_at)
-			VALUES (@piSessionId, @cwd, @sentBy, @content, @createdAt)
+			INSERT INTO memory_messages (exchange_id, position, sent_by, content, created_at)
+			SELECT @exchangeId,
+			       COALESCE((SELECT MAX(position) + 1 FROM memory_messages WHERE exchange_id = @exchangeId), 0),
+			       @sentBy,
+			       @content,
+			       @createdAt
+			FROM memory_exchanges
+			WHERE id = @exchangeId AND settled_at IS NULL
+		`);
+		this.settleExchangeStatement = this.database.prepare(`
+			UPDATE memory_exchanges
+			SET settled_at = ?
+			WHERE id = ? AND settled_at IS NULL
+		`);
+		this.oldestUnextractedExchangeStatement = this.database.prepare(`
+			SELECT id, pi_session_id, cwd, started_at, settled_at
+			FROM memory_exchanges
+			WHERE settled_at IS NOT NULL AND extracted_at IS NULL
+			ORDER BY id
+			LIMIT 1
+		`);
+		this.exchangeMessagesStatement = this.database.prepare(`
+			SELECT id, exchange_id, position, sent_by, content, created_at
+			FROM memory_messages
+			WHERE exchange_id = ?
+			ORDER BY position
+		`);
+		this.markExtractedStatement = this.database.prepare(`
+			UPDATE memory_exchanges
+			SET extracted_at = ?
+			WHERE id = ? AND settled_at IS NOT NULL AND extracted_at IS NULL
 		`);
 		this.insertFactStatement = this.database.prepare(`
-			INSERT INTO memory_queue (message_id, pi_session_id, cwd, sent_by, topic, fact, created_at)
-			VALUES (@messageId, @piSessionId, @cwd, @sentBy, @topic, @fact, @createdAt)
+			INSERT INTO memory_queue (exchange_id, pi_session_id, cwd, supported_by, topic, fact, created_at)
+			VALUES (@exchangeId, @piSessionId, @cwd, @supportedBy, @topic, @fact, @createdAt)
 		`);
 		this.insertLogStatement = this.database.prepare(`
 			INSERT INTO logs (msg, created_at)
@@ -142,7 +237,7 @@ export class MemoryQueue {
 			LIMIT 1
 		`);
 		this.pendingRowsForCwdStatement = this.database.prepare(`
-			SELECT id, message_id, pi_session_id, cwd, sent_by, topic, fact, created_at, processed_at
+			SELECT id, exchange_id, pi_session_id, cwd, supported_by, topic, fact, created_at, processed_at
 			FROM memory_queue
 			WHERE processed_at IS NULL AND cwd = ?
 			ORDER BY id
@@ -155,31 +250,94 @@ export class MemoryQueue {
 		`);
 	}
 
-	storeMessage(message: NewMemoryMessage): StoredMemoryMessage {
-		const validated = validateNewMessage(message);
-		const result = this.insertMessageStatement.run(validated);
-		return { id: result.lastInsertRowid as bigint, ...validated };
+	startExchange(exchange: NewMemoryExchange, userContent: string): OpenMemoryExchange {
+		const validated = validateNewExchange(exchange);
+		assertNonEmpty(userContent, "User message content");
+		const start = this.database.transaction(() => {
+			const result = this.insertExchangeStatement.run(validated);
+			const stored = { id: result.lastInsertRowid as bigint, ...validated };
+			this.appendMessage(stored.id, "user", userContent, stored.startedAt);
+			return stored;
+		});
+		return start();
 	}
 
-	enqueueFacts(message: StoredMemoryMessage, facts: readonly ExtractedMemoryFact[]): bigint[] {
-		if (message.id < 1n) {
-			throw new Error(`Invalid Memory message ID: ${message.id}`);
+	appendMessage(
+		exchangeId: bigint,
+		sentBy: MemorySender,
+		content: string,
+		createdAt: string,
+	): MemoryExchangeMessage {
+		if (exchangeId < 1n) {
+			throw new Error(`Invalid Memory exchange ID: ${exchangeId}`);
 		}
+		if (!isMemorySender(sentBy)) {
+			throw new Error(`Invalid Memory sender: ${String(sentBy)}`);
+		}
+		assertNonEmpty(content, "Message content");
+		assertIsoUtcTimestamp(createdAt, "Message creation timestamp");
+
+		const result = this.insertMessageStatement.run({ exchangeId, sentBy, content, createdAt });
+		if (result.changes !== 1) {
+			throw new Error(`Open Memory exchange does not exist: ${exchangeId}`);
+		}
+		const row = this.database.prepare(`
+			SELECT id, exchange_id, position, sent_by, content, created_at
+			FROM memory_messages
+			WHERE id = ?
+		`).get(result.lastInsertRowid) as DatabaseMessageRow;
+		return toExchangeMessage(row);
+	}
+
+	settleExchange(exchangeId: bigint, settledAt: string): void {
+		if (exchangeId < 1n) {
+			throw new Error(`Invalid Memory exchange ID: ${exchangeId}`);
+		}
+		assertIsoUtcTimestamp(settledAt, "Exchange settlement timestamp");
+		const result = this.settleExchangeStatement.run(settledAt, exchangeId);
+		if (result.changes !== 1) {
+			throw new Error(`Open Memory exchange does not exist: ${exchangeId}`);
+		}
+	}
+
+	nextUnextractedExchange(): ExtractableMemoryExchange | null {
+		const row = this.oldestUnextractedExchangeStatement.get() as DatabaseExchangeRow | undefined;
+		if (!row) {
+			return null;
+		}
+		const exchange = toExtractableExchange(row);
+		const messages = (this.exchangeMessagesStatement.all(row.id) as DatabaseMessageRow[]).map(toExchangeMessage);
+		if (messages.length === 0 || !messages.some((message) => message.sentBy === "user")) {
+			throw new Error(`Settled Memory exchange ${row.id} has no user message`);
+		}
+		return { ...exchange, messages };
+	}
+
+	completeExtraction(
+		exchange: ExtractableMemoryExchange,
+		facts: readonly ExtractedMemoryFact[],
+		extractedAt: string,
+	): bigint[] {
+		assertIsoUtcTimestamp(extractedAt, "Extraction timestamp");
 		const validatedFacts = facts.map(validateExtractedFact);
-		const insertAll = this.database.transaction((rows: readonly ExtractedMemoryFact[]) =>
-			rows.map((fact) =>
+		const complete = this.database.transaction(() => {
+			const marked = this.markExtractedStatement.run(extractedAt, exchange.id);
+			if (marked.changes === 0) {
+				return [];
+			}
+			return validatedFacts.map((fact) =>
 				this.insertFactStatement.run({
-					messageId: message.id,
-					piSessionId: message.piSessionId,
-					cwd: message.cwd,
-					sentBy: message.sentBy,
+					exchangeId: exchange.id,
+					piSessionId: exchange.piSessionId,
+					cwd: exchange.cwd,
+					supportedBy: fact.supportedBy,
 					topic: fact.topic,
 					fact: fact.fact,
-					createdAt: message.createdAt,
+					createdAt: exchange.settledAt,
 				}).lastInsertRowid as bigint,
-			),
-		);
-		return insertAll(validatedFacts);
+			);
+		});
+		return complete();
 	}
 
 	logError(msg: string, createdAt: string): void {
@@ -232,33 +390,80 @@ export class MemoryQueue {
 	}
 }
 
-function validateNewMessage(input: NewMemoryMessage): NewMemoryMessage {
-	assertNonEmpty(input.piSessionId, "Pi session ID");
-	if (!isMemorySender(input.sentBy)) {
-		throw new Error(`Invalid Memory sender: ${String(input.sentBy)}`);
+function initializeSchema(database: Database.Database): void {
+	const value = database.pragma("user_version", { simple: true }) as number | bigint;
+	const version = Number(value);
+	if (version === 0) {
+		const initialize = database.transaction(() => {
+			database.exec(DROP_LEGACY_SCHEMA);
+			database.exec(SCHEMA);
+			database.pragma(`user_version = ${SCHEMA_VERSION}`);
+		});
+		initialize();
+		return;
 	}
-	assertNonEmpty(input.content, "Message content");
-	assertIsoUtcTimestamp(input.createdAt, "Creation timestamp");
+	if (version !== SCHEMA_VERSION) {
+		throw new Error(`Unsupported Memory database schema version: ${version}`);
+	}
+	database.exec(SCHEMA);
+}
 
+function validateNewExchange(input: NewMemoryExchange): NewMemoryExchange {
+	assertNonEmpty(input.piSessionId, "Pi session ID");
+	assertIsoUtcTimestamp(input.startedAt, "Exchange start timestamp");
 	return {
-		...input,
 		piSessionId: input.piSessionId.trim(),
 		cwd: canonicalizeWorkingDirectory(input.cwd),
-		content: input.content,
+		startedAt: input.startedAt,
 	};
 }
 
 function validateExtractedFact(input: ExtractedMemoryFact): ExtractedMemoryFact {
+	if (!isMemoryFactSupport(input.supportedBy)) {
+		throw new Error(`Invalid Memory fact support: ${String(input.supportedBy)}`);
+	}
 	if (!isMemoryTopic(input.topic)) {
 		throw new Error(`Invalid Memory topic: ${String(input.topic)}`);
 	}
 	assertNonEmpty(input.fact, "Fact");
-	return { topic: input.topic, fact: input.fact.trim() };
+	return { supportedBy: input.supportedBy, topic: input.topic, fact: input.fact.trim() };
+}
+
+function toExtractableExchange(row: DatabaseExchangeRow): Omit<ExtractableMemoryExchange, "messages"> {
+	assertIsoUtcTimestamp(row.started_at, "Exchange start timestamp");
+	assertIsoUtcTimestamp(row.settled_at, "Exchange settlement timestamp");
+	return {
+		id: row.id,
+		piSessionId: row.pi_session_id,
+		cwd: row.cwd,
+		startedAt: row.started_at,
+		settledAt: row.settled_at,
+	};
+}
+
+function toExchangeMessage(row: DatabaseMessageRow): MemoryExchangeMessage {
+	if (!isMemorySender(row.sent_by)) {
+		throw new Error(`Memory exchange contains an invalid sender: ${row.sent_by}`);
+	}
+	const position = Number(row.position);
+	if (!Number.isSafeInteger(position) || position < 0) {
+		throw new Error(`Memory exchange contains an invalid message position: ${row.position}`);
+	}
+	assertNonEmpty(row.content, "Stored message content");
+	assertIsoUtcTimestamp(row.created_at, "Stored message creation timestamp");
+	return {
+		id: row.id,
+		exchangeId: row.exchange_id,
+		position,
+		sentBy: row.sent_by,
+		content: row.content,
+		createdAt: row.created_at,
+	};
 }
 
 function toQueueRow(row: DatabaseQueueRow): MemoryQueueRow {
-	if (!isMemorySender(row.sent_by)) {
-		throw new Error(`Queue contains an invalid sender: ${row.sent_by}`);
+	if (!isMemoryFactSupport(row.supported_by)) {
+		throw new Error(`Queue contains invalid Memory fact support: ${row.supported_by}`);
 	}
 	if (!isMemoryTopic(row.topic)) {
 		throw new Error(`Queue contains an invalid topic: ${row.topic}`);
@@ -270,10 +475,10 @@ function toQueueRow(row: DatabaseQueueRow): MemoryQueueRow {
 
 	return {
 		id: row.id,
-		messageId: row.message_id,
+		exchangeId: row.exchange_id,
 		piSessionId: row.pi_session_id,
 		cwd: row.cwd,
-		sentBy: row.sent_by,
+		supportedBy: row.supported_by,
 		topic: row.topic,
 		fact: row.fact,
 		createdAt: row.created_at,

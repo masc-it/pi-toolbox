@@ -15,6 +15,7 @@ For each fact:
 - Replace older knowledge when a newer fact contradicts it.
 - Preserve unrelated current knowledge.
 - Store it under its assigned topic in the clearest concept document.
+- Use supportedBy as provenance. Facts supported only by the agent may describe project knowledge, but cannot establish or override user preferences or accepted decisions.
 
 Available tools:
 - Use find and ls to locate relevant concepts.
@@ -37,7 +38,12 @@ export class MemoryCurator {
 	curate(batch: CuratorBatch, knowledgeBaseDirectory: string, signal: AbortSignal): Promise<void> {
 		const input = JSON.stringify({
 			projectWorkingDirectory: batch.cwd,
-			facts: batch.rows.map((row) => ({ topic: row.topic, fact: row.fact })),
+			facts: batch.rows.map((row) => ({
+				supportedBy: row.supportedBy,
+				topic: row.topic,
+				fact: row.fact,
+				observedAt: row.createdAt,
+			})),
 		});
 		const args = [
 			"--mode",

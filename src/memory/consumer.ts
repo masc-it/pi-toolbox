@@ -142,7 +142,12 @@ export function buildBoundedBatch(pending: PendingMemoryBatch): CuratorBatch {
 	for (const row of pending.rows) {
 		const candidate = [...rows, row];
 		const bytes = Buffer.byteLength(
-			JSON.stringify(candidate.map((item) => ({ topic: item.topic, fact: item.fact }))),
+			JSON.stringify(candidate.map((item) => ({
+				supportedBy: item.supportedBy,
+				topic: item.topic,
+				fact: item.fact,
+				observedAt: item.createdAt,
+			}))),
 			"utf8",
 		);
 		if (bytes > MEMORY_BATCH_MAX_BYTES) {

@@ -8,6 +8,9 @@ export type MemoryTopic = string;
 export const MEMORY_SENDERS = ["user", "agent"] as const;
 export type MemorySender = (typeof MEMORY_SENDERS)[number];
 
+export const MEMORY_FACT_SUPPORT = ["user", "agent", "both"] as const;
+export type MemoryFactSupport = (typeof MEMORY_FACT_SUPPORT)[number];
+
 export const MEMORY_BATCH_MAX_FACTS = 10;
 export const MEMORY_BATCH_MAX_BYTES = 32 * 1024;
 
@@ -35,4 +38,8 @@ export function isMemoryTopic(value: unknown): value is MemoryTopic {
 
 export function isMemorySender(value: unknown): value is MemorySender {
 	return typeof value === "string" && MEMORY_SENDERS.some((sender) => sender === value);
+}
+
+export function isMemoryFactSupport(value: unknown): value is MemoryFactSupport {
+	return typeof value === "string" && MEMORY_FACT_SUPPORT.some((support) => support === value);
 }

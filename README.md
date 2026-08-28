@@ -39,7 +39,7 @@ The analyzer ranks files by its AST-based quality heuristic, hard-limit violatio
 
 Prompt Polish model configuration is stored under the Pi agent directory at `pi-toolbox/config.json`. Workflow content is not persisted.
 
-Memory stores its queue and error log in `pi-toolbox/memory.sqlite`. Errors are written to the `logs` table and are not printed in the Pi UI. If `~/work-memory` is missing, Memory initializes the Git repository, root index, and topic directories automatically.
+Memory groups each user interaction and its completed agent responses into one conversation exchange, then extracts durable facts after Pi is fully settled. Exchanges, the fact queue, and errors are stored in `pi-toolbox/memory.sqlite`; errors remain hidden from the Pi UI. If `~/work-memory` is missing, Memory initializes the Git repository, root index, and topic directories automatically.
 
 ## Development
 
