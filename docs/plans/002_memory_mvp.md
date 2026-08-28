@@ -67,7 +67,7 @@ Instructions can contain facts about a project or workflow. Feedback can contain
 
 ## SQLite storage
 
-The database is stored under the Pi Toolbox data directory, outside the knowledge-base repository. It contains the original messages and the fact queue. SQLite foreign-key enforcement is enabled for every connection. The exchange schema is a clean break: a legacy unversioned Memory database is dropped and recreated on the first startup instead of being migrated.
+The database is stored under the Pi Toolbox data directory, outside the knowledge-base repository. It contains the original messages and the fact queue. SQLite foreign-key enforcement is enabled for every connection. Memory does not migrate operational data between schema versions. A version mismatch drops and recreates the Memory tables so stale exchanges, facts, and errors cannot cross schema boundaries.
 
 ### Conversation exchanges
 
@@ -278,7 +278,9 @@ The knowledge-base repository is changed only by the curator flow.
 - One successful batch creates at most one commit.
 - Queue rows are marked as processed only after a successful commit or a confirmed no-op.
 - A curator, validation, or Git failure leaves the rows pending.
-- The consumer stops after a failure so later facts cannot pass an unresolved earlier batch.
+- The failed working directory retries after 5 seconds, 30 seconds, and 5 minutes.
+- A fourth consecutive failure blocks that working directory until the next Memory worker starts.
+- Other working directories continue while one directory waits or remains blocked.
 
 A retry is idempotent. If files already contain the facts, the curator performs a no-op and the rows can be marked as processed.
 

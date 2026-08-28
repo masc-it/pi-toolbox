@@ -1,11 +1,14 @@
-import { MEMORY_BATCH_MAX_BYTES } from "./config.ts";
+import { MEMORY_BATCH_MAX_BYTES, MEMORY_BATCH_MAX_FACTS } from "./config.ts";
 import { MemoryCurator, type CuratorBatch } from "./curator.ts";
 import { acquireMemoryLock } from "./lock.ts";
 import { recordMemoryError, type MemoryErrorWriter } from "./log.ts";
 import type { PendingMemoryBatch } from "./queue.ts";
 
+const BATCH_RETRY_DELAYS_MS = [5_000, 30_000, 5 * 60_000] as const;
+const CONSUMER_RETRY_DELAY_MS = 30_000;
+
 interface ConsumerQueue extends MemoryErrorWriter {
-	nextPendingBatch(): PendingMemoryBatch | null;
+	nextPendingBatch(maxRows?: number, excludedCwds?: ReadonlySet<string>): PendingMemoryBatch | null;
 	markProcessed(ids: readonly bigint[], processedAt: string): void;
 	close(): void;
 }
@@ -23,14 +26,21 @@ interface ConsumerRepository {
 	rollback(): void;
 }
 
+interface BatchRetryState {
+	failures: number;
+	retryAt: number | null;
+}
+
 type LockAcquirer = typeof acquireMemoryLock;
 
 export class MemoryConsumer {
 	private readonly abortController = new AbortController();
+	private readonly retries = new Map<string, BatchRetryState>();
 	private flight: Promise<void> | null = null;
+	private retryTimer: NodeJS.Timeout | null = null;
+	private retryWakeAt: number | null = null;
 	private wakeRequested = false;
 	private closed = false;
-	private failed = false;
 
 	constructor(
 		private readonly queue: ConsumerQueue,
@@ -41,7 +51,7 @@ export class MemoryConsumer {
 	) {}
 
 	wake(): void {
-		if (this.closed || this.failed) {
+		if (this.closed) {
 			return;
 		}
 		this.wakeRequested = true;
@@ -56,7 +66,7 @@ export class MemoryConsumer {
 				return;
 			}
 			this.flight = null;
-			if (this.wakeRequested && !this.closed && !this.failed) {
+			if (this.wakeRequested && !this.closed) {
 				this.wake();
 			}
 		});
@@ -65,6 +75,7 @@ export class MemoryConsumer {
 	async close(): Promise<void> {
 		this.closed = true;
 		this.abortController.abort();
+		this.clearRetryTimer();
 		await this.flight;
 		this.queue.close();
 	}
@@ -79,8 +90,8 @@ export class MemoryConsumer {
 			if (this.closed && isAbortError(error)) {
 				return;
 			}
-			this.failed = true;
 			logConsumerFailure(this.queue, error);
+			this.scheduleWake(CONSUMER_RETRY_DELAY_MS);
 		}
 	}
 
@@ -88,11 +99,22 @@ export class MemoryConsumer {
 		const lock = await this.acquireLock(this.lockPath, this.abortController.signal);
 		try {
 			while (!this.closed) {
-				const pending = this.queue.nextPendingBatch();
+				const pending = this.queue.nextPendingBatch(MEMORY_BATCH_MAX_FACTS, this.excludedCwds());
 				if (!pending) {
+					this.scheduleNextBatchRetry();
 					return;
 				}
-				await this.processBatch(buildBoundedBatch(pending));
+				const batch = buildBoundedBatch(pending);
+				try {
+					await this.processBatch(batch);
+					this.retries.delete(batch.cwd);
+				} catch (error) {
+					if (this.closed && isMemoryConsumerAbort(error)) {
+						throw error.cause;
+					}
+					const retry = this.recordBatchFailure(batch.cwd);
+					logConsumerFailure(this.queue, error, retry);
+				}
 			}
 		} finally {
 			lock.release();
@@ -131,6 +153,59 @@ export class MemoryConsumer {
 			}
 			throw new MemoryConsumerFailure(stage, batch, error);
 		}
+	}
+
+	private excludedCwds(): ReadonlySet<string> {
+		const now = Date.now();
+		return new Set(
+			[...this.retries.entries()]
+				.filter(([, state]) => state.retryAt === null || state.retryAt > now)
+				.map(([cwd]) => cwd),
+		);
+	}
+
+	private recordBatchFailure(cwd: string): BatchRetryState {
+		const failures = (this.retries.get(cwd)?.failures ?? 0) + 1;
+		const delay = BATCH_RETRY_DELAYS_MS[failures - 1];
+		const state = { failures, retryAt: delay === undefined ? null : Date.now() + delay };
+		this.retries.set(cwd, state);
+		this.scheduleNextBatchRetry();
+		return state;
+	}
+
+	private scheduleNextBatchRetry(): void {
+		const retryTimes = [...this.retries.values()]
+			.map((state) => state.retryAt)
+			.filter((retryAt): retryAt is number => retryAt !== null);
+		if (retryTimes.length === 0) {
+			return;
+		}
+		this.scheduleWake(Math.max(0, Math.min(...retryTimes) - Date.now()));
+	}
+
+	private scheduleWake(delayMs: number): void {
+		if (this.closed) {
+			return;
+		}
+		const wakeAt = Date.now() + delayMs;
+		if (this.retryTimer && this.retryWakeAt !== null && this.retryWakeAt <= wakeAt) {
+			return;
+		}
+		this.clearRetryTimer();
+		this.retryWakeAt = wakeAt;
+		this.retryTimer = setTimeout(() => {
+			this.retryTimer = null;
+			this.retryWakeAt = null;
+			this.wake();
+		}, delayMs);
+	}
+
+	private clearRetryTimer(): void {
+		if (this.retryTimer) {
+			clearTimeout(this.retryTimer);
+		}
+		this.retryTimer = null;
+		this.retryWakeAt = null;
 	}
 }
 
@@ -171,7 +246,7 @@ class MemoryConsumerFailure extends Error {
 	}
 }
 
-function logConsumerFailure(writer: MemoryErrorWriter, error: unknown): void {
+function logConsumerFailure(writer: MemoryErrorWriter, error: unknown, retry?: BatchRetryState): void {
 	if (error instanceof MemoryConsumerFailure) {
 		recordMemoryError(writer, {
 			component: "memory",
@@ -179,6 +254,13 @@ function logConsumerFailure(writer: MemoryErrorWriter, error: unknown): void {
 			pi_session_id: error.batch.rows[0]?.piSessionId,
 			cwd: error.batch.cwd,
 			queue_row_ids: error.batch.rows.map((row) => row.id.toString()),
+			...(retry
+				? {
+					retry_attempt: retry.failures,
+					retry_at: retry.retryAt === null ? null : new Date(retry.retryAt).toISOString(),
+					blocked: retry.retryAt === null,
+				}
+				: {}),
 			error: formatError(error.cause),
 		});
 		return;
@@ -190,10 +272,14 @@ function logConsumerFailure(writer: MemoryErrorWriter, error: unknown): void {
 	});
 }
 
+function isMemoryConsumerAbort(error: unknown): error is MemoryConsumerFailure & { cause: DOMException } {
+	return error instanceof MemoryConsumerFailure && isAbortError(error.cause);
+}
+
 function formatError(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-function isAbortError(error: unknown): boolean {
+function isAbortError(error: unknown): error is DOMException {
 	return error instanceof DOMException && error.name === "AbortError";
 }

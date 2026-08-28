@@ -1,3 +1,4 @@
+import type { PiInvocation } from "../pi/invocation.ts";
 import type { MemoryConfig, MemorySender } from "./config.ts";
 import type {
 	ExtractableMemoryExchange,
@@ -9,6 +10,7 @@ import type {
 export interface MemoryWorkerConfig extends MemoryConfig {
 	piSessionId: string;
 	cwd: string;
+	piInvocation: PiInvocation;
 }
 
 interface MemoryWorkerMethodMap {

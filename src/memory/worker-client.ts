@@ -15,9 +15,12 @@ import type {
 	MemoryWorkerResult,
 } from "./worker-protocol.ts";
 
+const REQUEST_TIMEOUT_MS = 30_000;
+
 interface PendingRequest {
 	resolve(value: unknown): void;
 	reject(error: Error): void;
+	timeout: NodeJS.Timeout;
 }
 
 export class MemoryWorkerClient {
@@ -29,6 +32,7 @@ export class MemoryWorkerClient {
 	private started = false;
 	private closing = false;
 	private closed = false;
+	private terminalError: Error | null = null;
 	private closePromise: Promise<void> | null = null;
 	private resolveStartup!: () => void;
 	private rejectStartup!: (error: Error) => void;
@@ -45,9 +49,12 @@ export class MemoryWorkerClient {
 		this.worker.on("message", (message: unknown) => this.handleMessage(message));
 		this.worker.on("error", (error) => this.fail(error));
 		this.worker.on("exit", (code) => {
+			this.closed = true;
 			if (!this.started || !this.closing) {
 				this.fail(new Error(code === 0 ? "Memory worker exited unexpectedly" : `Memory worker exited with code ${code}`));
+				return;
 			}
+			this.rejectPending(new Error("Memory worker is closed"));
 		});
 	}
 
@@ -100,13 +107,9 @@ export class MemoryWorkerClient {
 		method: M,
 		params: MemoryWorkerParams<M>,
 	): Promise<MemoryWorkerResult<M>> {
-		if (this.closing || this.closed) {
-			throw new Error("Memory worker is closed");
-		}
+		this.assertAvailable();
 		await this.startup;
-		if (this.closing || this.closed) {
-			throw new Error("Memory worker is closed");
-		}
+		this.assertAvailable();
 		return this.sendRequest(method, params);
 	}
 
@@ -117,14 +120,29 @@ export class MemoryWorkerClient {
 		const id = this.nextRequestId++;
 		const request = { type: "request", id, method, params } as MemoryWorkerRequest;
 		return new Promise<MemoryWorkerResult<M>>((resolve, reject) => {
+			const timeout = setTimeout(() => {
+				if (!this.pending.delete(id)) {
+					return;
+				}
+				const error = new Error(`Memory worker request timed out: ${method}`);
+				reject(error);
+				this.fail(error);
+				void this.worker.terminate();
+			}, REQUEST_TIMEOUT_MS);
 			this.pending.set(id, {
 				resolve: (value) => resolve(value as MemoryWorkerResult<M>),
 				reject,
+				timeout,
 			});
 			try {
+				this.assertAvailableForSend();
 				this.worker.postMessage(request);
 			} catch (error) {
-				this.pending.delete(id);
+				const pending = this.pending.get(id);
+				if (pending) {
+					clearTimeout(pending.timeout);
+					this.pending.delete(id);
+				}
 				reject(error instanceof Error ? error : new Error(String(error)));
 			}
 		});
@@ -133,6 +151,9 @@ export class MemoryWorkerClient {
 	private async closeWorker(): Promise<void> {
 		let shutdownSucceeded = false;
 		try {
+			if (this.terminalError || this.closed) {
+				return;
+			}
 			await this.startup;
 			await this.sendRequest("shutdown", null);
 			shutdownSucceeded = true;
@@ -168,6 +189,7 @@ export class MemoryWorkerClient {
 		if (!pending) {
 			return;
 		}
+		clearTimeout(pending.timeout);
 		this.pending.delete(message.id);
 		if (message.ok) {
 			pending.resolve(message.result);
@@ -177,12 +199,35 @@ export class MemoryWorkerClient {
 	}
 
 	private fail(error: Error): void {
-		this.rejectStartup(error);
-		this.rejectPending(error);
+		if (!this.terminalError) {
+			this.terminalError = error;
+		}
+		this.closed = true;
+		this.rejectStartup(this.terminalError);
+		this.rejectPending(this.terminalError);
+	}
+
+	private assertAvailable(): void {
+		if (this.terminalError) {
+			throw this.terminalError;
+		}
+		if (this.closing || this.closed) {
+			throw new Error("Memory worker is closed");
+		}
+	}
+
+	private assertAvailableForSend(): void {
+		if (this.terminalError) {
+			throw this.terminalError;
+		}
+		if (this.closed) {
+			throw new Error("Memory worker is closed");
+		}
 	}
 
 	private rejectPending(error: Error): void {
 		for (const request of this.pending.values()) {
+			clearTimeout(request.timeout);
 			request.reject(error);
 		}
 		this.pending.clear();

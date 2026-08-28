@@ -20,7 +20,10 @@ class MemoryWorkerRuntime {
 			const repository = new MemoryRepository(config.knowledgeBaseDirectory);
 			consumer = new MemoryConsumer(
 				this.queue,
-				new MemoryCurator(),
+				new MemoryCurator((args) => ({
+					command: config.piInvocation.command,
+					args: [...config.piInvocation.args, ...args],
+				})),
 				repository,
 				`${config.databasePath}.lock`,
 			);
@@ -179,7 +182,19 @@ function validateWorkerConfig(value: unknown): MemoryWorkerConfig {
 	const knowledgeBaseDirectory = requireNonEmptyString(value.knowledgeBaseDirectory, "knowledgeBaseDirectory");
 	const piSessionId = requireNonEmptyString(value.piSessionId, "piSessionId");
 	const cwd = requireNonEmptyString(value.cwd, "cwd");
-	return { dataDirectory, databasePath, knowledgeBaseDirectory, piSessionId, cwd };
+	const piInvocation = validatePiInvocation(value.piInvocation);
+	return { dataDirectory, databasePath, knowledgeBaseDirectory, piSessionId, cwd, piInvocation };
+}
+
+function validatePiInvocation(value: unknown): MemoryWorkerConfig["piInvocation"] {
+	if (!isRecord(value)) {
+		throw new Error("Memory worker configuration has an invalid piInvocation");
+	}
+	const command = requireNonEmptyString(value.command, "piInvocation.command");
+	if (!Array.isArray(value.args) || value.args.some((argument) => typeof argument !== "string")) {
+		throw new Error("Memory worker configuration has invalid piInvocation.args");
+	}
+	return { command, args: [...value.args] };
 }
 
 function requireNonEmptyString(value: unknown, key: string): string {

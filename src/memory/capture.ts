@@ -1,5 +1,6 @@
 import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { WorkflowModelClient } from "../model/client.ts";
+import { getPiInvocation } from "../pi/invocation.ts";
 import { createMemoryConfig } from "./config.ts";
 import { MemoryExtractor, toExtractionExchange } from "./extractor.ts";
 import type {
@@ -161,6 +162,7 @@ export function registerMemory(pi: ExtensionAPI): void {
 				...config,
 				piSessionId: ctx.sessionManager.getSessionId(),
 				cwd: ctx.cwd,
+				piInvocation: getPiInvocation([]),
 			});
 			const extractor = new MemoryExtractor(
 				new WorkflowModelClient(ctx.modelRegistry),

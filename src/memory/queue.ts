@@ -12,7 +12,7 @@ import {
 } from "./config.ts";
 import { canonicalizeWorkingDirectory } from "./paths.ts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 2;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_exchanges (
@@ -77,7 +77,7 @@ CREATE INDEX IF NOT EXISTS memory_queue_exchange_idx
 ON memory_queue (exchange_id, id);
 `;
 
-const DROP_LEGACY_SCHEMA = `
+const RESET_SCHEMA = `
 DROP TABLE IF EXISTS memory_queue;
 DROP TABLE IF EXISTS memory_messages;
 DROP TABLE IF EXISTS memory_exchanges;
@@ -167,7 +167,7 @@ export class MemoryQueue {
 	private readonly markExtractedStatement: Database.Statement;
 	private readonly insertFactStatement: Database.Statement;
 	private readonly insertLogStatement: Database.Statement;
-	private readonly oldestPendingCwdStatement: Database.Statement;
+	private readonly pendingCwdsStatement: Database.Statement;
 	private readonly pendingRowsForCwdStatement: Database.Statement;
 	private readonly markProcessedStatement: Database.Statement;
 
@@ -229,12 +229,12 @@ export class MemoryQueue {
 			INSERT INTO logs (msg, created_at)
 			VALUES (?, ?)
 		`);
-		this.oldestPendingCwdStatement = this.database.prepare(`
-			SELECT cwd
+		this.pendingCwdsStatement = this.database.prepare(`
+			SELECT cwd, MIN(id) AS first_id
 			FROM memory_queue
 			WHERE processed_at IS NULL
-			ORDER BY id
-			LIMIT 1
+			GROUP BY cwd
+			ORDER BY first_id
 		`);
 		this.pendingRowsForCwdStatement = this.database.prepare(`
 			SELECT id, exchange_id, pi_session_id, cwd, supported_by, topic, fact, created_at, processed_at
@@ -346,12 +346,13 @@ export class MemoryQueue {
 		this.insertLogStatement.run(msg, createdAt);
 	}
 
-	nextPendingBatch(maxRows = MEMORY_BATCH_MAX_FACTS): PendingMemoryBatch | null {
+	nextPendingBatch(maxRows = MEMORY_BATCH_MAX_FACTS, excludedCwds: ReadonlySet<string> = new Set()): PendingMemoryBatch | null {
 		if (!Number.isInteger(maxRows) || maxRows < 1 || maxRows > MEMORY_BATCH_MAX_FACTS) {
 			throw new Error(`Batch row limit must be between 1 and ${MEMORY_BATCH_MAX_FACTS}`);
 		}
 
-		const oldest = this.oldestPendingCwdStatement.get() as { cwd: string } | undefined;
+		const pendingCwds = this.pendingCwdsStatement.all() as Array<{ cwd: string }>;
+		const oldest = pendingCwds.find((row) => !excludedCwds.has(row.cwd));
 		if (!oldest) {
 			return null;
 		}
@@ -393,19 +394,17 @@ export class MemoryQueue {
 function initializeSchema(database: Database.Database): void {
 	const value = database.pragma("user_version", { simple: true }) as number | bigint;
 	const version = Number(value);
-	if (version === 0) {
-		const initialize = database.transaction(() => {
-			database.exec(DROP_LEGACY_SCHEMA);
-			database.exec(SCHEMA);
-			database.pragma(`user_version = ${SCHEMA_VERSION}`);
-		});
-		initialize();
+	if (version === SCHEMA_VERSION) {
+		database.exec(SCHEMA);
 		return;
 	}
-	if (version !== SCHEMA_VERSION) {
-		throw new Error(`Unsupported Memory database schema version: ${version}`);
-	}
-	database.exec(SCHEMA);
+
+	const reset = database.transaction(() => {
+		database.exec(RESET_SCHEMA);
+		database.exec(SCHEMA);
+		database.pragma(`user_version = ${SCHEMA_VERSION}`);
+	});
+	reset();
 }
 
 function validateNewExchange(input: NewMemoryExchange): NewMemoryExchange {
