@@ -5,7 +5,7 @@ import { runProcess } from "../process/runner.ts";
 const MAX_OUTPUT_BYTES = 50 * 1024;
 const ANALYZER_PATH = fileURLToPath(new URL("../../scripts/python_complexity.py", import.meta.url));
 const PROMPT_PREFIX =
-	"Propose how to reduce the code complexity in the highest-offending Python file shown below. Remind of our coding principles.\n\n";
+	"Propose how to reduce the code complexity in the highest-offending Python file shown below.\n\n";
 
 export interface ComplexityResult {
 	report: string;

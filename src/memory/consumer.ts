@@ -1,5 +1,5 @@
 import { MEMORY_BATCH_MAX_BYTES, MEMORY_BATCH_MAX_FACTS } from "./config.ts";
-import { MemoryCurator, type CuratorBatch } from "./curator.ts";
+import { MemoryCurator, type CuratorBatch, type CuratorResult } from "./curator.ts";
 import { acquireMemoryLock } from "./lock.ts";
 import { recordMemoryError, type MemoryErrorWriter } from "./log.ts";
 import type { PendingMemoryBatch } from "./queue.ts";
@@ -14,7 +14,7 @@ interface ConsumerQueue extends MemoryErrorWriter {
 }
 
 interface ConsumerCurator {
-	curate(batch: CuratorBatch, knowledgeBaseDirectory: string, signal: AbortSignal): Promise<void>;
+	curate(batch: CuratorBatch, knowledgeBaseDirectory: string, signal: AbortSignal): Promise<CuratorResult>;
 }
 
 interface ConsumerRepository {
@@ -22,7 +22,7 @@ interface ConsumerRepository {
 	assertClean(): void;
 	changedPaths(): string[];
 	validateChanges(paths: readonly string[]): void;
-	commit(paths: readonly string[]): void;
+	commit(paths: readonly string[], message: string): void;
 	rollback(): void;
 }
 
@@ -131,14 +131,16 @@ export class MemoryConsumer {
 			this.repository.assertClean();
 			repositoryWasClean = true;
 			stage = "curator";
-			await this.curator.curate(batch, this.repository.path, this.abortController.signal);
+			const curatorResult = await this.curator.curate(batch, this.repository.path, this.abortController.signal);
 			stage = "changes";
 			const changedPaths = this.repository.changedPaths();
-			if (changedPaths.length > 0) {
+			stage = "curator-result";
+			assertCuratorResultMatchesChanges(curatorResult, changedPaths);
+			if (curatorResult.commitMessage !== null) {
 				stage = "validation";
 				this.repository.validateChanges(changedPaths);
 				stage = "commit";
-				this.repository.commit(changedPaths);
+				this.repository.commit(changedPaths, curatorResult.commitMessage);
 				committed = true;
 			}
 			stage = "queue-completion";
@@ -234,6 +236,15 @@ export function buildBoundedBatch(pending: PendingMemoryBatch): CuratorBatch {
 		throw new Error("Memory batch must contain at least one row");
 	}
 	return { cwd: pending.cwd, rows };
+}
+
+function assertCuratorResultMatchesChanges(result: CuratorResult, changedPaths: readonly string[]): void {
+	if (changedPaths.length > 0 && result.commitMessage === null) {
+		throw new Error("Memory curator changed the knowledge base without a commit message");
+	}
+	if (changedPaths.length === 0 && result.commitMessage !== null) {
+		throw new Error("Memory curator returned a commit message without knowledge-base changes");
+	}
 }
 
 class MemoryConsumerFailure extends Error {

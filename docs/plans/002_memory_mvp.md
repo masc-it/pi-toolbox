@@ -221,7 +221,7 @@ The curator receives a batch from one `cwd`. It works from `~/work-memory`, read
 
 The curator runs in an isolated Pi process with extension discovery disabled. This prevents its own prompt and agent turn from triggering Memory again.
 
-The curator edits complete concept documents and the root index directly. The surrounding application validates and commits the changes.
+The curator edits complete concept documents and the root index directly, then authors the Git commit message. The surrounding application validates the curator result and changed documents before performing the commit.
 
 #### Curator system prompt
 
@@ -250,9 +250,17 @@ Available tools:
 - Use write only to create new concept documents.
 
 Keep frontmatter valid YAML and quote string values that contain whitespace. Preserve the root index's `okf_version` frontmatter. Every other index requires `type: index`, a non-empty title, and a one-line description. Update index.md only when a concept is created, renamed, removed, moved, or its summary changes. Make no changes when the knowledge base is already canonical and current.
+
+After all filesystem work, return JSON containing only `commitMessage`. Return `null` when no final filesystem changes exist. Use `memory(<project-slug>): <summary>` for one project, `memory(global): <summary>` for global-only changes, and `memory: <summary>` for changes spanning scopes. Describe the resulting knowledge change with a lowercase action, one line of at most 72 characters, and no trailing period.
 ```
 
-The initial user message contains only the JSON batch payload: `projectWorkingDirectory` and ordered `facts`.
+The initial user message contains only the JSON batch payload: `projectWorkingDirectory` and ordered `facts`. The final curator response is strict JSON:
+
+```json
+{"commitMessage":"memory(contentai): reconcile OPM configuration"}
+```
+
+A no-op returns `{"commitMessage":null}`.
 
 ## Event flow
 
@@ -271,9 +279,10 @@ agent_settled
 
 Queue consumer
   -> select one cwd batch
-  -> curator agent updates ~/work-memory
+  -> curator agent updates ~/work-memory and authors commitMessage
+  -> compare commitMessage with the discovered change set
   -> validate OKF files
-  -> commit changed files with "updated" message
+  -> commit changed files with the curator-authored message
   -> set processed_at
 ```
 
@@ -287,11 +296,12 @@ The consumer follows this cycle:
 
 1. Find the `cwd` of the oldest pending row.
 2. Load a bounded set of pending rows for that `cwd`.
-3. Run one curator agent with the ordered facts.
-4. Validate every changed OKF document.
-5. Commit when files changed with "updated" as message.
-6. Set `processed_at` on the selected rows.
-7. Continue while pending rows remain.
+3. Run one curator agent with the ordered facts and parse its strict result.
+4. Require a valid commit message when files changed and `null` for a no-op.
+5. Validate every changed OKF document.
+6. Commit changed files with the curator-authored message.
+7. Set `processed_at` on the selected rows.
+8. Continue while pending rows remain.
 
 New facts can enter SQLite while the curator is running. They are handled by a later batch.
 
@@ -301,7 +311,8 @@ A module-level single-flight guard prevents overlapping consumers in one Pi proc
 
 The knowledge-base repository is changed only by the curator flow.
 
-- No file change means no commit.
+- No file change requires a `null` curator commit message and creates no commit.
+- Changed files require a valid curator-authored `memory(<scope>): summary` or `memory: summary` message.
 - One successful batch creates at most one commit.
 - Queue rows are marked as processed only after a successful commit or a confirmed no-op.
 - A curator, validation, or Git failure leaves the rows pending.
@@ -318,6 +329,8 @@ Memory failures do not fail the user's main agent turn. Errors are stored in the
 Boundary validation is strict:
 
 - Extractor output must match the fact schema.
+- Curator output must contain only `commitMessage`, and its value must agree with the discovered change set.
+- Commit messages must satisfy the Memory message convention and length limit.
 - Queue collection paths, provenance, and senders must be valid.
 - The knowledge-base path must remain under `~/work-memory`.
 - Changed concept documents must satisfy OKF v0.2 minimum rules.
@@ -392,6 +405,7 @@ Tasks:
 - Status: done - Add the single-flight consumer and cross-process lock.
 - Status: done - Build bounded batches for one canonical `cwd`.
 - Status: done - Run the isolated curator with medium thinking and Memory disabled.
+- Status: done - Require the curator to author a validated commit message or declare a no-op.
 - Status: done - Validate changes and commit only when required.
 - Status: done - Set `processed_at` after commit or no-op.
 

@@ -2,6 +2,7 @@ import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { listProjectCollections } from "./collections.ts";
+import { validateMemoryCommitMessage } from "./commit-message.ts";
 import {
 	isMemoryCollectionRoot,
 	isMemoryCollectionSegment,
@@ -47,10 +48,11 @@ export class MemoryRepository {
 		assertCollectionIndexes(this.path);
 	}
 
-	commit(paths: readonly string[]): void {
+	commit(paths: readonly string[], message: string): void {
 		if (paths.length === 0) throw new Error("Cannot commit an empty Memory change set");
+		const validatedMessage = validateMemoryCommitMessage(message);
 		runGit(this.path, ["add", "--all", "--", ...paths]);
-		runGit(this.path, ["commit", "-m", "updated"]);
+		runGit(this.path, ["commit", "-m", validatedMessage]);
 	}
 
 	rollback(): void {

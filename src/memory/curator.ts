@@ -1,6 +1,7 @@
 import type { PiInvocation } from "../pi/invocation.ts";
 import { getPiInvocation } from "../pi/invocation.ts";
 import { runHeadlessAgent } from "../pi/headless-agent.ts";
+import { validateMemoryCommitMessage } from "./commit-message.ts";
 import type { MemoryQueueRow } from "./queue.ts";
 
 export const MEMORY_CURATOR_MODEL = "openai-codex/gpt-5.6-luna";
@@ -35,11 +36,24 @@ Available tools:
 - Use edit to reconcile existing complete documents, including frontmatter when needed.
 - Use write only to create new concept documents and missing index.md files.
 
-Keep frontmatter valid YAML and quote string values that contain whitespace. Every index.md must start with frontmatter. Preserve the root index's okf_version-only frontmatter. Every other index requires type: index, a non-empty title, and a one-line description. Update the root index, projects/index.md, and the destination collection index when concepts or project collections change. Make no changes when the knowledge base is already canonical and current.`;
+Keep frontmatter valid YAML and quote string values that contain whitespace. Every index.md must start with frontmatter. Preserve the root index's okf_version-only frontmatter. Every other index requires type: index, a non-empty title, and a one-line description. Update the root index, projects/index.md, and the destination collection index when concepts or project collections change. Make no changes when the knowledge base is already canonical and current.
+
+After all filesystem work, return JSON only with exactly one commitMessage field.
+- Return {"commitMessage":null} when the knowledge base has no final filesystem changes.
+- For changes concerning one project, use "memory(<project-slug>): <summary>".
+- For changes concerning only global collections, use "memory(global): <summary>".
+- For changes spanning project and global knowledge or multiple projects, use "memory: <summary>".
+- Describe the resulting knowledge change, not the curation activity.
+- Start the summary with a lowercase action, use one line of at most 72 characters, and do not end it with a period.
+- Example: {"commitMessage":"memory(contentai): reconcile OPM configuration"}`;
 
 export interface CuratorBatch {
 	cwd: string;
 	rows: MemoryQueueRow[];
+}
+
+export interface CuratorResult {
+	commitMessage: string | null;
 }
 
 export type PiInvocationResolver = (args: string[]) => PiInvocation;
@@ -47,7 +61,7 @@ export type PiInvocationResolver = (args: string[]) => PiInvocation;
 export class MemoryCurator {
 	constructor(private readonly resolveInvocation: PiInvocationResolver = getPiInvocation) {}
 
-	async curate(batch: CuratorBatch, knowledgeBaseDirectory: string, signal: AbortSignal): Promise<void> {
+	async curate(batch: CuratorBatch, knowledgeBaseDirectory: string, signal: AbortSignal): Promise<CuratorResult> {
 		const input = JSON.stringify({
 			projectWorkingDirectory: batch.cwd,
 			facts: batch.rows.map((row) => ({
@@ -77,12 +91,33 @@ export class MemoryCurator {
 			CURATOR_TOOLS,
 			input,
 		];
-		await runHeadlessAgent({
+		const result = await runHeadlessAgent({
 			invocation: this.resolveInvocation(args),
 			cwd: knowledgeBaseDirectory,
 			signal,
 			abortMessage: "Memory curator stopped",
 			exitLabel: "Memory curator",
 		});
+		return parseCuratorResult(result.finalText);
 	}
+}
+
+export function parseCuratorResult(output: string): CuratorResult {
+	let value: unknown;
+	try {
+		value = JSON.parse(output) as unknown;
+	} catch (error) {
+		throw new Error("Memory curator returned invalid JSON", { cause: error });
+	}
+	if (!isRecord(value) || Object.keys(value).length !== 1 || !("commitMessage" in value)) {
+		throw new Error("Memory curator output must contain only commitMessage");
+	}
+	if (value.commitMessage === null) {
+		return { commitMessage: null };
+	}
+	return { commitMessage: validateMemoryCommitMessage(value.commitMessage) };
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
