@@ -2,6 +2,7 @@ import type { Theme } from "@earendil-works/pi-coding-agent";
 import type { Component, Focusable, TUI } from "@earendil-works/pi-tui";
 import { Key, matchesKey, truncateToWidth, visibleWidth } from "@earendil-works/pi-tui";
 import type { ToolboxView } from "../domain.ts";
+import type { MemoryStatus } from "../memory/settings-protocol.ts";
 import { OverlayNavigation } from "./navigation.ts";
 import type { ToolboxScreen, ToolboxScreenFactories, ToolboxScreenHost } from "./screen.ts";
 
@@ -27,6 +28,7 @@ export class ToolboxOverlay implements Component, Focusable, ToolboxScreenHost {
 		private readonly tui: TUI,
 		private readonly theme: Theme,
 		private readonly factories: ToolboxScreenFactories,
+		private readonly memoryStatus: MemoryStatus,
 		private readonly finish: () => void,
 	) {
 		this.navigation = new OverlayNavigation(initialView);
@@ -66,10 +68,12 @@ export class ToolboxOverlay implements Component, Focusable, ToolboxScreenHost {
 		const top = this.renderTopBorder(renderWidth);
 		const bottom = this.theme.fg("border", `╰${"─".repeat(renderWidth - 2)}╯`);
 		const bodyHeight = Math.max(0, this.tui.terminal.rows - 2);
-		const body = content.slice(0, bodyHeight).map((line) => this.renderContentLine(line, contentWidth));
-		while (body.length < bodyHeight) {
+		const contentHeight = Math.max(0, bodyHeight - 1);
+		const body = content.slice(0, contentHeight).map((line) => this.renderContentLine(line, contentWidth));
+		while (body.length < contentHeight) {
 			body.push(this.renderContentLine("", contentWidth));
 		}
+		if (bodyHeight > 0) body.push(this.renderContentLine(this.renderMemoryStatus(), contentWidth));
 		return [top, ...body, bottom];
 	}
 
@@ -106,6 +110,13 @@ export class ToolboxOverlay implements Component, Focusable, ToolboxScreenHost {
 
 	private createCurrentScreen(): ToolboxScreen {
 		return this.factories[this.navigation.current](this);
+	}
+
+	private renderMemoryStatus(): string {
+		const { enabled, pending, processed, errors } = this.memoryStatus;
+		const status = enabled ? "on" : "off";
+		const text = `Memory: ${status} · pending ${pending} · processed ${processed} · errors ${errors}`;
+		return this.theme.fg(enabled ? "success" : "muted", text);
 	}
 
 	private renderTopBorder(width: number): string {

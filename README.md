@@ -18,6 +18,7 @@ Restart Pi after installation.
 - `Ctrl+Enter` or `/tb-polish`: open Prompt Polish directly.
 - `Ctrl+.` or `/tb-context`: open Context Finder directly.
 - `/tb-complexity`: analyze Python code complexity directly.
+- `/tb-memory [on|off|toggle]`: control Memory globally. Omitting the argument toggles it. The current state and pending, processed, and error counts appear at the bottom of the Toolbox panel.
 
 Slash commands support terminals that do not emit distinct modified key sequences.
 
@@ -39,7 +40,7 @@ The analyzer ranks files by its AST-based quality heuristic, hard-limit violatio
 
 Prompt Polish model configuration is stored under the Pi agent directory at `pi-toolbox/config.json`. Workflow content is not persisted.
 
-Memory groups each user interaction and its completed agent responses into one conversation exchange, then extracts durable facts after Pi is fully settled. Project knowledge is stored under `projects/<project>/`; reusable coding, documentation, personal, and team knowledge stays in global collections. Exchanges, the fact queue, and errors are stored in `pi-toolbox/memory.sqlite`; schema changes reset these operational tables instead of migrating them. Failed curation retries per working directory without blocking other projects. Successful curation changes use a validated, curator-authored `memory(<scope>): summary` or `memory: summary` Git commit message. Errors remain hidden from the Pi UI. SQLite, Git, and knowledge-base filesystem work run in a dedicated worker so they cannot block Pi's TUI event loop. If `~/work-memory` is missing, Memory initializes the Git repository and collection indices automatically.
+Memory groups each user interaction and its completed agent responses into one conversation exchange, then extracts durable facts after Pi is fully settled. Project knowledge is stored under `projects/<project>/`; reusable coding, documentation, personal, and team knowledge stays in global collections. Exchanges, the fact queue, errors, and the global enabled setting are stored in `pi-toolbox/memory.sqlite`. The enabled setting survives operational schema resets. When Memory is disabled, Pi reads this setting through a short-lived worker and does not start capture, extraction, repository, or curator infrastructure. Failed curation retries per working directory without blocking other projects. Successful curation changes use a validated, curator-authored `memory(<scope>): summary` or `memory: summary` Git commit message. Errors remain hidden from the Pi UI. SQLite, Git, and knowledge-base filesystem work run in a dedicated worker so they cannot block Pi's TUI event loop. If `~/work-memory` is missing, Memory initializes the Git repository and collection indices automatically.
 
 ## Development
 

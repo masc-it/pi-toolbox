@@ -6,9 +6,9 @@ import { ToolboxOverlayController } from "./pi/overlay-controller.ts";
 import { registerToolboxShortcuts } from "./pi/shortcuts.ts";
 
 export default function piToolbox(pi: ExtensionAPI): void {
-	registerMemory(pi);
+	const memory = registerMemory(pi);
 
-	const overlayController = new ToolboxOverlayController(new ToolboxConfigStore(), (prompt) => {
+	const overlayController = new ToolboxOverlayController(new ToolboxConfigStore(), memory.getStatus, (prompt) => {
 		pi.sendUserMessage(prompt, { deliverAs: "followUp" });
 	});
 	registerToolboxCommands(pi, overlayController);

@@ -1,6 +1,7 @@
 import type { ExtensionContext } from "@earendil-works/pi-coding-agent";
-import type { ToolboxView } from "../domain.ts";
+import type { ToolboxConfig, ToolboxView } from "../domain.ts";
 import type { ToolboxConfigStore } from "../config.ts";
+import type { MemoryStatus } from "../memory/settings-protocol.ts";
 import { ToolboxOverlay } from "../ui/overlay.ts";
 import { createToolboxScreens } from "../ui/screens.ts";
 
@@ -9,6 +10,7 @@ export class ToolboxOverlayController {
 
 	constructor(
 		private readonly configStore: ToolboxConfigStore,
+		private readonly getMemoryStatus: () => Promise<MemoryStatus>,
 		private readonly submitPrompt: (prompt: string) => void,
 	) {}
 
@@ -22,9 +24,13 @@ export class ToolboxOverlayController {
 			return;
 		}
 
-		let config;
+		let config: ToolboxConfig;
+		let memoryStatus: MemoryStatus;
 		try {
-			config = await this.configStore.load();
+			[config, memoryStatus] = await Promise.all([
+				this.configStore.load(),
+				this.getMemoryStatus(),
+			]);
 		} catch (error) {
 			ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			return;
@@ -40,7 +46,7 @@ export class ToolboxOverlayController {
 						config,
 						submitPrompt: this.submitPrompt,
 					});
-					const overlay = new ToolboxOverlay(view, tui, theme, screens, () => done());
+					const overlay = new ToolboxOverlay(view, tui, theme, screens, memoryStatus, () => done());
 					this.activeOverlay = overlay;
 					return overlay;
 				},

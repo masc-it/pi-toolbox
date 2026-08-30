@@ -77,7 +77,7 @@ CREATE INDEX IF NOT EXISTS memory_queue_exchange_idx
 ON memory_queue (exchange_id, id);
 `;
 
-const RESET_SCHEMA = `
+const RESET_OPERATIONAL_SCHEMA = `
 DROP TABLE IF EXISTS memory_queue;
 DROP TABLE IF EXISTS memory_messages;
 DROP TABLE IF EXISTS memory_exchanges;
@@ -400,7 +400,7 @@ function initializeSchema(database: Database.Database): void {
 	}
 
 	const reset = database.transaction(() => {
-		database.exec(RESET_SCHEMA);
+		database.exec(RESET_OPERATIONAL_SCHEMA);
 		database.exec(SCHEMA);
 		database.pragma(`user_version = ${SCHEMA_VERSION}`);
 	});

@@ -1,10 +1,12 @@
-import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { WorkflowModelClient } from "../model/client.ts";
 import { getPiInvocation } from "../pi/invocation.ts";
 import { createMemoryConfig, type MemoryRoutingContext } from "./config.ts";
 import { MemoryExtractor, toExtractionExchange } from "./extractor.ts";
 import type { ExtractableMemoryExchange, ExtractedMemoryFact, NewMemoryExchange } from "./queue.ts";
 import type { MemoryExtractionWork } from "./worker-protocol.ts";
+import { MemorySettingsClient } from "./settings-client.ts";
+import type { MemoryStatus } from "./settings-protocol.ts";
 import { MemoryWorkerClient } from "./worker-client.ts";
 
 interface CapturedUserMessage extends NewMemoryExchange {
@@ -125,25 +127,55 @@ export class MemoryCaptureRuntime {
 	}
 }
 
-export function registerMemory(pi: ExtensionAPI): void {
-	let runtime: MemoryCaptureRuntime | undefined;
+export interface MemoryControl {
+	getStatus(): Promise<MemoryStatus>;
+}
 
-	pi.on("session_start", (_event, ctx) => {
+export function registerMemory(pi: ExtensionAPI): MemoryControl {
+	const config = createMemoryConfig();
+	const settings = new MemorySettingsClient(config.databasePath);
+	let runtime: MemoryCaptureRuntime | undefined;
+	let transition = Promise.resolve();
+
+	const runTransition = <T>(operation: () => Promise<T>): Promise<T> => {
+		const result = transition.then(operation, operation);
+		transition = result.then(() => undefined, () => undefined);
+		return result;
+	};
+
+	const startRuntime = async (ctx: ExtensionContext): Promise<void> => {
+		if (runtime) return;
+		const worker = new MemoryWorkerClient({
+			...config,
+			piSessionId: ctx.sessionManager.getSessionId(),
+			cwd: ctx.cwd,
+			piInvocation: getPiInvocation([]),
+		});
 		try {
-			const config = createMemoryConfig();
-			const worker = new MemoryWorkerClient({
-				...config,
-				piSessionId: ctx.sessionManager.getSessionId(),
-				cwd: ctx.cwd,
-				piInvocation: getPiInvocation([]),
-			});
 			runtime = new MemoryCaptureRuntime(
 				new MemoryExtractor(new WorkflowModelClient(ctx.modelRegistry)),
 				worker,
 			);
 			runtime.wake();
+		} catch (error) {
+			await worker.close();
+			throw error;
+		}
+	};
+
+	const stopRuntime = async (): Promise<void> => {
+		const activeRuntime = runtime;
+		runtime = undefined;
+		await activeRuntime?.close();
+	};
+
+	pi.on("session_start", async (_event, ctx) => {
+		try {
+			await runTransition(async () => {
+				if (await settings.isEnabled()) await startRuntime(ctx);
+			});
 		} catch {
-			runtime = undefined;
+			await stopRuntime();
 		}
 	});
 
@@ -170,10 +202,35 @@ export function registerMemory(pi: ExtensionAPI): void {
 	});
 
 	pi.on("session_shutdown", async () => {
-		const activeRuntime = runtime;
-		runtime = undefined;
-		await activeRuntime?.close();
+		await runTransition(stopRuntime);
 	});
+
+	pi.registerCommand("tb-memory", {
+		description: "Enable or disable Memory globally",
+		handler: async (args, ctx) => {
+			try {
+				const action = parseMemoryCommandAction(args);
+				const enabled = await runTransition(async () => {
+					const nextEnabled = action === "toggle"
+						? await settings.toggleEnabled()
+						: await settings.setEnabled(action === "on");
+					if (nextEnabled) {
+						await startRuntime(ctx);
+					} else {
+						await stopRuntime();
+					}
+					return nextEnabled;
+				});
+				ctx.ui.notify(`Memory is ${enabled ? "on" : "off"}`, "info");
+			} catch (error) {
+				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
+			}
+		},
+	});
+
+	return {
+		getStatus: () => runTransition(() => settings.getStatus()),
+	};
 }
 
 export function getConversationMessageText(message: AgentEndEvent["messages"][number]): string {
@@ -208,6 +265,14 @@ async function recordMemoryFailure(
 	} catch {
 		// Memory logging must not interrupt the main Pi session.
 	}
+}
+
+type MemoryCommandAction = "on" | "off" | "toggle";
+
+function parseMemoryCommandAction(args: string): MemoryCommandAction {
+	const action = args.trim().toLowerCase() || "toggle";
+	if (action === "on" || action === "off" || action === "toggle") return action;
+	throw new Error("Usage: /tb-memory [on|off|toggle]");
 }
 
 function isAbortError(error: unknown): boolean {
