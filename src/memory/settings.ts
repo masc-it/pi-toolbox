@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
+import { MemoryRequestReceipts, type MemoryRequestIdentity } from "./request-receipts.ts";
 import type { MemoryStatus } from "./settings-protocol.ts";
 
 const SETTINGS_SCHEMA = `
@@ -18,6 +19,7 @@ export class MemorySettingsStore {
 	private readonly readEnabledStatement: Database.Statement;
 	private readonly writeEnabledStatement: Database.Statement;
 	private readonly toggleEnabledStatement: Database.Statement;
+	private readonly receipts: MemoryRequestReceipts;
 
 	constructor(readonly path: string) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -45,6 +47,7 @@ export class MemorySettingsStore {
 			WHERE id = 1
 			RETURNING enabled
 		`);
+		this.receipts = new MemoryRequestReceipts(this.database);
 	}
 
 	isEnabled(): boolean {
@@ -96,6 +99,26 @@ export class MemorySettingsStore {
 		return toEnabled(this.toggleEnabledStatement.get());
 	}
 
+	changeEnabledWithReceipt(
+		request: MemoryRequestIdentity,
+		action: "on" | "off" | "toggle",
+		createdAt: string,
+	): MemoryStatus {
+		const change = this.database.transaction(() => {
+			const receipt = this.receipts.find(request);
+			if (receipt.found) {
+				if (!isMemoryStatus(receipt.result)) throw new Error("Memory settings receipt has an invalid result");
+				return receipt.result;
+			}
+			if (action === "toggle") this.toggleEnabled();
+			else this.setEnabled(action === "on");
+			const status = this.getStatus();
+			this.receipts.insert(request, status, createdAt);
+			return status;
+		});
+		return change();
+	}
+
 	close(): void {
 		this.database.close();
 	}
@@ -131,6 +154,18 @@ function databaseFileExists(path: string): boolean {
 
 function isNodeError(error: unknown): error is NodeJS.ErrnoException {
 	return error instanceof Error && "code" in error;
+}
+
+function isMemoryStatus(value: unknown): value is MemoryStatus {
+	return isRecord(value) &&
+		typeof value.enabled === "boolean" &&
+		isCount(value.pending) &&
+		isCount(value.processed) &&
+		isCount(value.errors);
+}
+
+function isCount(value: unknown): value is number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

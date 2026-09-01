@@ -1,5 +1,6 @@
 import { fork, type ChildProcess } from "node:child_process";
 import { fileURLToPath } from "node:url";
+import type { PiInvocation } from "../../pi/invocation.ts";
 import {
 	MEMORY_PROTOCOL_VERSION,
 	parseMemoryConsumerMessage,
@@ -14,6 +15,7 @@ const CONSUMER_RESTART_DELAY_MS = 100;
 interface ConsumerSlot {
 	readonly queue: MemoryQueueName;
 	readonly entryPath: string;
+	readonly environment: NodeJS.ProcessEnv;
 	child: ChildProcess | null;
 	ready: boolean;
 	wakePending: boolean;
@@ -25,14 +27,28 @@ export interface MemoryConsumerEntries {
 	curation: string;
 }
 
+export interface MemoryConsumerSupervisorConfig {
+	databasePath: string;
+	knowledgeBaseDirectory: string;
+	piInvocation: PiInvocation;
+	entries?: MemoryConsumerEntries;
+}
+
 export class MemoryConsumerSupervisor {
 	private readonly slots: Record<MemoryQueueName, ConsumerSlot>;
 	private running = false;
 
-	constructor(entries: MemoryConsumerEntries = defaultConsumerEntries()) {
+	constructor(config: MemoryConsumerSupervisorConfig) {
+		const entries = config.entries ?? defaultConsumerEntries();
 		this.slots = {
-			extraction: createSlot("extraction", entries.extraction),
-			curation: createSlot("curation", entries.curation),
+			extraction: createSlot("extraction", entries.extraction, {
+				PI_TOOLBOX_MEMORY_EXTRACTION_CONFIG: JSON.stringify({
+					databasePath: config.databasePath,
+					knowledgeBaseDirectory: config.knowledgeBaseDirectory,
+					piInvocation: config.piInvocation,
+				}),
+			}),
+			curation: createSlot("curation", entries.curation, {}),
 		};
 	}
 
@@ -81,6 +97,7 @@ export class MemoryConsumerSupervisor {
 
 		const child = fork(slot.entryPath, [], {
 			stdio: ["ignore", "ignore", "ignore", "ipc"],
+			env: { ...process.env, ...slot.environment },
 		});
 		slot.child = child;
 		slot.ready = false;
@@ -118,6 +135,8 @@ export class MemoryConsumerSupervisor {
 					slot.ready = true;
 					finishStartup();
 					if (slot.wakePending) this.sendWake(slot);
+				} else if (message.type === "facts-ready") {
+					this.wake("curation");
 				}
 			});
 			child.once("error", (error) => finishStartup(error));
@@ -168,8 +187,8 @@ export class MemoryConsumerSupervisor {
 	}
 }
 
-function createSlot(queue: MemoryQueueName, entryPath: string): ConsumerSlot {
-	return { queue, entryPath, child: null, ready: false, wakePending: false, restartTimer: null };
+function createSlot(queue: MemoryQueueName, entryPath: string, environment: NodeJS.ProcessEnv): ConsumerSlot {
+	return { queue, entryPath, environment, child: null, ready: false, wakePending: false, restartTimer: null };
 }
 
 function defaultConsumerEntries(): MemoryConsumerEntries {

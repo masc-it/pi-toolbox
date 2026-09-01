@@ -3,14 +3,16 @@ import { connect, type Socket } from "node:net";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import type { MemoryConfig, MemoryServicePaths } from "../config.ts";
+import { getPiInvocation, type PiInvocation } from "../../pi/invocation.ts";
 
 const SERVER_READY_TIMEOUT_MS = 10_000;
 const SOCKET_CONNECT_TIMEOUT_MS = 500;
 const SOCKET_RETRY_DELAY_MS = 50;
 
 export async function connectToMemoryService(
-	config: Pick<MemoryConfig, "dataDirectory" | "databasePath">,
+	config: MemoryConfig,
 	paths: MemoryServicePaths,
+	piInvocation: PiInvocation = getPiInvocation([]),
 ): Promise<Socket> {
 	mkdirSync(config.dataDirectory, { recursive: true, mode: 0o700 });
 	chmodSync(config.dataDirectory, 0o700);
@@ -25,7 +27,7 @@ export async function connectToMemoryService(
 				const racedConnection = await tryConnect(paths.socketPath);
 				if (racedConnection) return racedConnection;
 				rmSync(paths.socketPath, { force: true });
-				launchDetachedServer(config.databasePath, paths.socketPath, paths.logPath);
+				launchDetachedServer(config, piInvocation, paths.socketPath, paths.logPath);
 				return await waitForSocket(paths.socketPath, deadline);
 			} finally {
 				closeSync(lock);
@@ -50,7 +52,12 @@ async function waitForSocket(socketPath: string, deadline: number): Promise<Sock
 	throw new Error(`Memory server did not become ready within ${SERVER_READY_TIMEOUT_MS}ms`);
 }
 
-function launchDetachedServer(databasePath: string, socketPath: string, logPath: string): void {
+function launchDetachedServer(
+	config: MemoryConfig,
+	piInvocation: PiInvocation,
+	socketPath: string,
+	logPath: string,
+): void {
 	const entryPath = fileURLToPath(new URL("./entry.mjs", import.meta.url));
 	const log = openSync(logPath, "a", 0o600);
 	try {
@@ -59,7 +66,12 @@ function launchDetachedServer(databasePath: string, socketPath: string, logPath:
 			stdio: ["ignore", log, log],
 			env: {
 				...process.env,
-				PI_TOOLBOX_MEMORY_SERVER_CONFIG: JSON.stringify({ socketPath, databasePath }),
+				PI_TOOLBOX_MEMORY_SERVER_CONFIG: JSON.stringify({
+					socketPath,
+					databasePath: config.databasePath,
+					knowledgeBaseDirectory: config.knowledgeBaseDirectory,
+					piInvocation,
+				}),
 			},
 		});
 		child.once("error", () => undefined);

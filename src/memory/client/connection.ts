@@ -69,7 +69,7 @@ export class MemoryServerConnection {
 	}
 
 	static async connect(
-		config: Pick<MemoryConfig, "dataDirectory" | "databasePath">,
+		config: MemoryConfig,
 		options: MemoryConnectionOptions,
 	): Promise<MemoryServerConnection> {
 		const socket = await connectToMemoryService(config, createMemoryServicePaths(config.dataDirectory));

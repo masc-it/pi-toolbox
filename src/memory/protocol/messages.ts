@@ -82,6 +82,11 @@ export type MemoryConsumerMessage =
 		type: "drained";
 		version: typeof MEMORY_PROTOCOL_VERSION;
 		consumer: MemoryQueueName;
+	}
+	| {
+		type: "facts-ready";
+		version: typeof MEMORY_PROTOCOL_VERSION;
+		consumer: "extraction";
 	};
 
 export function parseMemoryHandshake(value: unknown): MemoryHandshake {
@@ -152,9 +157,14 @@ export function parseMemoryConsumerWake(value: unknown, queue: MemoryQueueName):
 
 export function parseMemoryConsumerMessage(value: unknown): MemoryConsumerMessage {
 	const record = requireExactRecord(value, ["type", "version", "consumer"], "consumer message");
-	if ((record.type !== "ready" && record.type !== "drained") || record.version !== MEMORY_PROTOCOL_VERSION || !isMemoryQueueName(record.consumer)) {
+	if (record.version !== MEMORY_PROTOCOL_VERSION || !isMemoryQueueName(record.consumer)) {
 		throw new Error("Invalid Memory consumer message");
 	}
+	if (record.type === "facts-ready") {
+		if (record.consumer !== "extraction") throw new Error("Invalid Memory facts-ready message");
+		return { type: "facts-ready", version: MEMORY_PROTOCOL_VERSION, consumer: "extraction" };
+	}
+	if (record.type !== "ready" && record.type !== "drained") throw new Error("Invalid Memory consumer message");
 	return { type: record.type, version: MEMORY_PROTOCOL_VERSION, consumer: record.consumer };
 }
 

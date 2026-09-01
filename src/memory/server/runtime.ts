@@ -1,6 +1,7 @@
 import { chmodSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
+import type { PiInvocation } from "../../pi/invocation.ts";
 import { MemoryFrameDecoder, encodeMemoryFrame } from "../protocol/framing.ts";
 import {
 	MEMORY_PROTOCOL_VERSION,
@@ -13,41 +14,59 @@ import {
 	type MemoryRequest,
 	type MemoryResponse,
 } from "../protocol/messages.ts";
+import { recordMemoryError } from "../log.ts";
+import { MemoryQueue } from "../queue.ts";
+import { createMemoryRequestIdentity } from "../request-receipts.ts";
 import { MemorySettingsStore } from "../settings.ts";
 import { MemoryServerSettings } from "./settings.ts";
 import { MemoryConsumerSupervisor } from "./supervisor.ts";
 
 const HANDSHAKE_TIMEOUT_MS = 10_000;
+const DEFAULT_DISCONNECTED_SESSION_GRACE_MS = 30_000;
 
 export interface MemoryServerConfig {
 	socketPath: string;
 	databasePath: string;
+	knowledgeBaseDirectory: string;
+	piInvocation: PiInvocation;
+	disconnectedSessionGraceMs?: number;
 }
 
-interface Receipt {
+interface ClientSession {
 	sessionId: string;
-	fingerprint: string;
-	response: Promise<MemoryResponse>;
+	cwd: string;
 }
 
 export class MemoryServer {
 	private readonly server: Server;
 	private readonly consumers: MemoryConsumerSupervisor;
+	private readonly queue: MemoryQueue;
 	private readonly settingsStore: MemorySettingsStore;
 	private readonly settings: MemoryServerSettings;
 	private readonly sockets = new Set<Socket>();
 	private readonly sessionChains = new Map<string, Promise<void>>();
-	private readonly receipts = new Map<string, Receipt>();
+	private readonly sessionConnections = new Map<string, number>();
+	private readonly sessionExpiryTimers = new Map<string, NodeJS.Timeout>();
+	private readonly disconnectedSessionGraceMs: number;
 	private started = false;
 	private stopping = false;
 
 	constructor(
 		private readonly config: MemoryServerConfig,
-		consumers = new MemoryConsumerSupervisor(),
+		consumers?: MemoryConsumerSupervisor,
 	) {
-		this.consumers = consumers;
+		this.disconnectedSessionGraceMs = config.disconnectedSessionGraceMs ?? DEFAULT_DISCONNECTED_SESSION_GRACE_MS;
+		if (!Number.isInteger(this.disconnectedSessionGraceMs) || this.disconnectedSessionGraceMs < 0) {
+			throw new Error("Memory disconnected-session grace period is invalid");
+		}
+		this.consumers = consumers ?? new MemoryConsumerSupervisor({
+			databasePath: config.databasePath,
+			knowledgeBaseDirectory: config.knowledgeBaseDirectory,
+			piInvocation: config.piInvocation,
+		});
+		this.queue = new MemoryQueue(config.databasePath);
 		this.settingsStore = new MemorySettingsStore(config.databasePath);
-		this.settings = new MemoryServerSettings(this.settingsStore, consumers);
+		this.settings = new MemoryServerSettings(this.settingsStore, this.consumers);
 		this.server = createServer((socket) => this.accept(socket));
 	}
 
@@ -81,21 +100,24 @@ export class MemoryServer {
 	async stop(): Promise<void> {
 		if (this.stopping) return;
 		this.stopping = true;
+		for (const timer of this.sessionExpiryTimers.values()) clearTimeout(timer);
+		this.sessionExpiryTimers.clear();
 		for (const socket of this.sockets) socket.destroy();
 		if (this.started) await closeServer(this.server);
 		await this.consumers.stop();
 		this.settingsStore.close();
+		this.queue.close();
 		rmSync(this.config.socketPath, { force: true });
 		this.started = false;
 	}
 
 	private accept(socket: Socket): void {
 		this.sockets.add(socket);
-		let sessionId: string | null = null;
+		let session: ClientSession | null = null;
 		let closed = false;
 		const handshakeTimeout = setTimeout(() => rejectConnection("Memory handshake timed out"), HANDSHAKE_TIMEOUT_MS);
 		const decoder = new MemoryFrameDecoder((value) => {
-			if (!sessionId) {
+			if (!session) {
 				let handshake;
 				try {
 					handshake = parseMemoryHandshake(value);
@@ -114,7 +136,8 @@ export class MemoryServer {
 					socket.end();
 					return;
 				}
-				sessionId = handshake.sessionId;
+				session = { sessionId: handshake.sessionId, cwd: handshake.cwd };
+				this.registerSessionConnection(session.sessionId);
 				clearTimeout(handshakeTimeout);
 				writeFrame(socket, { type: "handshake-response", version: MEMORY_PROTOCOL_VERSION, ok: true });
 				return;
@@ -127,9 +150,9 @@ export class MemoryServer {
 				rejectConnection(formatError(error));
 				return;
 			}
-			const requestSessionId = sessionId;
-			void this.schedule(requestSessionId, async () => {
-				const response = await this.respond(requestSessionId, request);
+			const requestSession = session;
+			void this.schedule(requestSession.sessionId, async () => {
+				const response = await this.execute(requestSession, request);
 				if (!socket.destroyed) writeFrame(socket, response);
 			});
 		});
@@ -167,6 +190,7 @@ export class MemoryServer {
 			closed = true;
 			clearTimeout(handshakeTimeout);
 			this.sockets.delete(socket);
+			if (session) this.unregisterSessionConnection(session.sessionId);
 		});
 	}
 
@@ -180,45 +204,90 @@ export class MemoryServer {
 		return current;
 	}
 
-	private respond(sessionId: string, request: MemoryRequest): Promise<MemoryResponse> {
-		if (request.method !== "changeEnabled") return this.execute(request);
-		const fingerprint = JSON.stringify({ method: request.method, params: request.params });
-		const existing = this.receipts.get(request.id);
-		if (existing) {
-			if (existing.sessionId !== sessionId || existing.fingerprint !== fingerprint) {
-				return Promise.resolve(failureResponse(request.id, "Memory request ID was reused for a different request"));
-			}
-			return existing.response;
-		}
-
-		const response = this.execute(request);
-		this.receipts.set(request.id, { sessionId, fingerprint, response });
-		return response;
-	}
-
-	private async execute(request: MemoryRequest): Promise<MemoryResponse> {
+	private async execute(session: ClientSession, request: MemoryRequest): Promise<MemoryResponse> {
 		try {
+			const identity = createMemoryRequestIdentity(request.id, session.sessionId, request.method, request.params);
 			let result: unknown;
 			switch (request.method) {
 				case "connectSession":
 					result = null satisfies MemoryMethodResult<"connectSession">;
 					break;
+				case "captureUser":
+					result = this.settingsStore.isEnabled()
+						? this.queue.captureUserForSession(identity, {
+							piSessionId: session.sessionId,
+							cwd: session.cwd,
+							startedAt: request.params.createdAt,
+						}, request.params.content)
+						: this.queue.recordRequestResult(identity, null, request.params.createdAt);
+					break;
+				case "captureAgent":
+					result = this.settingsStore.isEnabled()
+						? this.queue.captureAgentForSession(
+							identity,
+							session.sessionId,
+							request.params.content,
+							request.params.createdAt,
+						)
+						: this.queue.recordRequestResult(identity, null, request.params.createdAt);
+					break;
+				case "settleExchange":
+				case "closeSession":
+					result = this.queue.settleSessionExchange(
+						identity,
+						session.sessionId,
+						request.params.settledAt,
+					) satisfies MemoryMethodResult<"settleExchange">;
+					if (result) this.wake("extraction");
+					break;
 				case "getStatus":
 					result = this.settings.getStatus() satisfies MemoryMethodResult<"getStatus">;
 					break;
 				case "changeEnabled":
-					result = await this.settings.change(request.params.action) satisfies MemoryMethodResult<"changeEnabled">;
+					result = await this.settings.change(identity, request.params.action) satisfies MemoryMethodResult<"changeEnabled">;
 					break;
-				case "captureUser":
-				case "captureAgent":
-				case "settleExchange":
-				case "closeSession":
-					throw new Error(`Memory method is not available yet: ${request.method}`);
 			}
 			return { type: "response", version: MEMORY_PROTOCOL_VERSION, id: request.id, ok: true, result };
 		} catch (error) {
 			return failureResponse(request.id, formatError(error));
 		}
+	}
+
+	private registerSessionConnection(sessionId: string): void {
+		const expiry = this.sessionExpiryTimers.get(sessionId);
+		if (expiry) clearTimeout(expiry);
+		this.sessionExpiryTimers.delete(sessionId);
+		this.sessionConnections.set(sessionId, (this.sessionConnections.get(sessionId) ?? 0) + 1);
+	}
+
+	private unregisterSessionConnection(sessionId: string): void {
+		const connections = this.sessionConnections.get(sessionId);
+		if (!connections) return;
+		if (connections > 1) {
+			this.sessionConnections.set(sessionId, connections - 1);
+			return;
+		}
+		this.sessionConnections.delete(sessionId);
+		if (this.stopping) return;
+		const timer = setTimeout(() => {
+			this.sessionExpiryTimers.delete(sessionId);
+			void this.schedule(sessionId, async () => {
+				if (this.sessionConnections.has(sessionId) || this.stopping) return;
+				try {
+					if (this.queue.settleOpenExchangeForSession(sessionId, new Date().toISOString())) {
+						this.wake("extraction");
+					}
+				} catch (error) {
+					recordMemoryError(this.queue, {
+						component: "memory",
+						stage: "expire-session",
+						pi_session_id: sessionId,
+						error: formatError(error),
+					});
+				}
+			});
+		}, this.disconnectedSessionGraceMs);
+		this.sessionExpiryTimers.set(sessionId, timer);
 	}
 }
 
@@ -242,12 +311,21 @@ function parseServerConfig(value: string | undefined): MemoryServerConfig {
 	} catch {
 		throw new Error("PI_TOOLBOX_MEMORY_SERVER_CONFIG must be JSON");
 	}
-	if (!isRecord(parsed) || !hasOnlyKeys(parsed, ["socketPath", "databasePath"])) {
+	if (!isRecord(parsed) || !hasOnlyKeys(parsed, ["socketPath", "databasePath", "knowledgeBaseDirectory", "piInvocation"])) {
 		throw new Error("Memory server configuration is invalid");
+	}
+	if (!isRecord(parsed.piInvocation) || !hasOnlyKeys(parsed.piInvocation, ["command", "args"])) {
+		throw new Error("Memory server Pi invocation is invalid");
+	}
+	const command = requireNonEmptyString(parsed.piInvocation.command, "piInvocation.command");
+	if (!Array.isArray(parsed.piInvocation.args) || parsed.piInvocation.args.some((argument) => typeof argument !== "string")) {
+		throw new Error("Memory server Pi invocation arguments are invalid");
 	}
 	return {
 		socketPath: requireNonEmptyString(parsed.socketPath, "socketPath"),
 		databasePath: requireNonEmptyString(parsed.databasePath, "databasePath"),
+		knowledgeBaseDirectory: requireNonEmptyString(parsed.knowledgeBaseDirectory, "knowledgeBaseDirectory"),
+		piInvocation: { command, args: [...parsed.piInvocation.args] },
 	};
 }
 

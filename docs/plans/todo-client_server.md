@@ -301,24 +301,24 @@ QA checkpoint:
 
 ## Phase 2: Conversation producer and extraction consumer
 
-- [todo] Route finalized user and successful terminal agent messages through the client.
-- [todo] Resolve open exchanges by Pi session ID.
-- [todo] Add durable request receipts for mutating protocol methods.
-- [todo] Settle exchanges through `agent_settled`, `closeSession`, and disconnected-session expiry.
-- [todo] Acknowledge settlement after its SQLite transaction without waiting for extraction.
-- [todo] Drain settled, unextracted exchanges in the extraction consumer.
-- [todo] Run the existing extractor through headless Pi with optional context and Memory disabled.
-- [todo] Insert facts and set `extracted_at` in one transaction.
-- [todo] Wake the curation consumer after fact production commits.
+- [done] Route finalized user and successful terminal agent messages through the client.
+- [done] Resolve open exchanges by Pi session ID.
+- [done] Add durable request receipts for mutating protocol methods.
+- [done] Settle exchanges through `agent_settled`, `closeSession`, and disconnected-session expiry.
+- [done] Acknowledge settlement after its SQLite transaction without waiting for extraction.
+- [done] Drain settled, unextracted exchanges in the extraction consumer.
+- [done] Run the existing extractor through headless Pi with optional context and Memory disabled.
+- [done] Insert facts and set `extracted_at` in one transaction.
+- [done] Wake the curation consumer after fact production commits.
 
 QA checkpoint:
 
-- [todo] Capture interleaved conversations from several Pi sessions and inspect separate ordered exchanges.
-- [todo] Resend acknowledged capture requests and confirm no messages are duplicated.
-- [todo] Confirm the settlement acknowledgement arrives before extraction completes.
-- [todo] Close a client during extraction and confirm the consumer completes the settled exchange.
-- [todo] Terminate extraction before completion and confirm the replacement selects the exchange again.
-- [todo] Return an empty fact list and confirm the exchange is marked extracted without queue rows.
+- [done] Capture interleaved conversations from several Pi sessions and inspect separate ordered exchanges.
+- [done] Resend acknowledged capture requests and confirm no messages are duplicated.
+- [done] Confirm the settlement acknowledgement arrives before extraction completes.
+- [done] Close a client during extraction and confirm the consumer completes the settled exchange.
+- [done] Terminate extraction before completion and confirm the replacement selects the exchange again.
+- [done] Return an empty fact list and confirm the exchange is marked extracted without queue rows.
 
 ## Phase 3: Fact producer and curation consumer
 

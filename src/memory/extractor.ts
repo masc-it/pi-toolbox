@@ -15,7 +15,7 @@ export const MEMORY_EXTRACTOR_PROFILE: WorkflowModelProfile = {
 	thinkingLevel: "off",
 };
 
-function buildExtractorSystemPrompt(routing: MemoryRoutingContext): string {
+export function buildExtractorSystemPrompt(routing: MemoryRoutingContext): string {
 	return `You extract durable current knowledge from a complete conversation exchange between a user and a coding agent.
 
 First identify the exchange purpose and apply the corresponding rule:

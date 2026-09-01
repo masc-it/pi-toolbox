@@ -1,4 +1,5 @@
 import { MemorySettingsStore } from "../settings.ts";
+import type { MemoryRequestIdentity } from "../request-receipts.ts";
 import type { MemoryStatus } from "../settings-protocol.ts";
 import type { MemoryConsumerSupervisor } from "./supervisor.ts";
 
@@ -12,11 +13,12 @@ export class MemoryServerSettings {
 		return this.store.getStatus();
 	}
 
-	async change(action: "on" | "off" | "toggle"): Promise<MemoryStatus> {
-		const enabled = action === "toggle"
-			? this.store.toggleEnabled()
-			: this.store.setEnabled(action === "on");
-		await this.consumers.setEnabled(enabled);
-		return this.store.getStatus();
+	async change(
+		request: MemoryRequestIdentity,
+		action: "on" | "off" | "toggle",
+	): Promise<MemoryStatus> {
+		const status = this.store.changeEnabledWithReceipt(request, action, new Date().toISOString());
+		await this.consumers.setEnabled(status.enabled);
+		return status;
 	}
 }

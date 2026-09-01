@@ -11,6 +11,7 @@ import {
 	type MemorySender,
 } from "./config.ts";
 import { canonicalizeWorkingDirectory } from "./paths.ts";
+import { MemoryRequestReceipts, type MemoryRequestIdentity } from "./request-receipts.ts";
 
 const SCHEMA_VERSION = 3;
 
@@ -136,6 +137,13 @@ interface DatabaseExchangeRow {
 	settled_at: string;
 }
 
+interface DatabaseOpenExchangeRow {
+	id: bigint;
+	pi_session_id: string;
+	cwd: string;
+	started_at: string;
+}
+
 interface DatabaseMessageRow {
 	id: bigint;
 	exchange_id: bigint;
@@ -161,6 +169,7 @@ export class MemoryQueue {
 	private readonly database: Database.Database;
 	private readonly insertExchangeStatement: Database.Statement;
 	private readonly insertMessageStatement: Database.Statement;
+	private readonly openExchangeForSessionStatement: Database.Statement;
 	private readonly settleExchangeStatement: Database.Statement;
 	private readonly oldestUnextractedExchangeStatement: Database.Statement;
 	private readonly exchangeMessagesStatement: Database.Statement;
@@ -170,6 +179,7 @@ export class MemoryQueue {
 	private readonly pendingCwdsStatement: Database.Statement;
 	private readonly pendingRowsForCwdStatement: Database.Statement;
 	private readonly markProcessedStatement: Database.Statement;
+	private readonly receipts: MemoryRequestReceipts;
 
 	constructor(readonly path: string) {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
@@ -197,6 +207,13 @@ export class MemoryQueue {
 			       @createdAt
 			FROM memory_exchanges
 			WHERE id = @exchangeId AND settled_at IS NULL
+		`);
+		this.openExchangeForSessionStatement = this.database.prepare(`
+			SELECT id, pi_session_id, cwd, started_at
+			FROM memory_exchanges
+			WHERE pi_session_id = ? AND settled_at IS NULL
+			ORDER BY id
+			LIMIT 2
 		`);
 		this.settleExchangeStatement = this.database.prepare(`
 			UPDATE memory_exchanges
@@ -248,6 +265,7 @@ export class MemoryQueue {
 			SET processed_at = ?
 			WHERE id = ? AND processed_at IS NULL
 		`);
+		this.receipts = new MemoryRequestReceipts(this.database);
 	}
 
 	startExchange(exchange: NewMemoryExchange, userContent: string): OpenMemoryExchange {
@@ -260,6 +278,119 @@ export class MemoryQueue {
 			return stored;
 		});
 		return start();
+	}
+
+	recordRequestResult(
+		request: MemoryRequestIdentity,
+		result: null | boolean,
+		createdAt: string,
+	): null | boolean {
+		assertIsoUtcTimestamp(createdAt, "Request completion timestamp");
+		const record = this.database.transaction(() => {
+			const receipt = this.receipts.find(request);
+			if (receipt.found) {
+				if (receipt.result !== null && typeof receipt.result !== "boolean") {
+					throw new Error("Memory request receipt has an invalid result");
+				}
+				return receipt.result;
+			}
+			this.receipts.insert(request, result, createdAt);
+			return result;
+		});
+		return record();
+	}
+
+	captureUserForSession(
+		request: MemoryRequestIdentity,
+		exchange: NewMemoryExchange,
+		content: string,
+	): null {
+		const capture = this.database.transaction(() => {
+			const receipt = this.receipts.find(request);
+			if (receipt.found) {
+				if (receipt.result !== null) throw new Error("Memory capture receipt has an invalid result");
+				return null;
+			}
+			const validated = validateNewExchange(exchange);
+			assertNonEmpty(content, "User message content");
+			const open = this.openExchangeForSession(validated.piSessionId);
+			if (open) {
+				if (open.cwd !== validated.cwd) {
+					throw new Error(`Open Memory exchange uses a different working directory: ${open.cwd}`);
+				}
+				this.appendMessage(open.id, "user", content, validated.startedAt);
+			} else {
+				this.startExchange(validated, content);
+			}
+			this.receipts.insert(request, null, validated.startedAt);
+			return null;
+		});
+		return capture();
+	}
+
+	captureAgentForSession(
+		request: MemoryRequestIdentity,
+		piSessionId: string,
+		content: string,
+		createdAt: string,
+	): null {
+		const capture = this.database.transaction(() => {
+			const receipt = this.receipts.find(request);
+			if (receipt.found) {
+				if (receipt.result !== null) throw new Error("Memory capture receipt has an invalid result");
+				return null;
+			}
+			assertNonEmpty(piSessionId, "Pi session ID");
+			assertNonEmpty(content, "Agent message content");
+			assertIsoUtcTimestamp(createdAt, "Agent message creation timestamp");
+			const open = this.openExchangeForSession(piSessionId);
+			if (open) this.appendMessage(open.id, "agent", content, createdAt);
+			this.receipts.insert(request, null, createdAt);
+			return null;
+		});
+		return capture();
+	}
+
+	settleSessionExchange(
+		request: MemoryRequestIdentity,
+		piSessionId: string,
+		settledAt: string,
+	): boolean {
+		const settle = this.database.transaction(() => {
+			const receipt = this.receipts.find(request);
+			if (receipt.found) {
+				if (typeof receipt.result !== "boolean") throw new Error("Memory settlement receipt has an invalid result");
+				return receipt.result;
+			}
+			const settled = this.settleOpenExchangeForSession(piSessionId, settledAt);
+			this.receipts.insert(request, settled, settledAt);
+			return settled;
+		});
+		return settle();
+	}
+
+	settleOpenExchangeForSession(piSessionId: string, settledAt: string): boolean {
+		assertNonEmpty(piSessionId, "Pi session ID");
+		assertIsoUtcTimestamp(settledAt, "Exchange settlement timestamp");
+		const open = this.openExchangeForSession(piSessionId);
+		if (!open) return false;
+		this.settleExchange(open.id, settledAt);
+		return true;
+	}
+
+	openExchangeForSession(piSessionId: string): OpenMemoryExchange | null {
+		assertNonEmpty(piSessionId, "Pi session ID");
+		const rows = this.openExchangeForSessionStatement.all(piSessionId) as DatabaseOpenExchangeRow[];
+		if (rows.length > 1) throw new Error(`Pi session has multiple open Memory exchanges: ${piSessionId}`);
+		const row = rows[0];
+		if (!row) return null;
+		assertIsoUtcTimestamp(row.started_at, "Exchange start timestamp");
+		return {
+			id: row.id,
+			piSessionId: row.pi_session_id,
+			cwd: row.cwd,
+			startedAt: row.started_at,
+		};
 	}
 
 	appendMessage(

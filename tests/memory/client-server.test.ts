@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -22,7 +22,14 @@ async function createService(): Promise<TestService> {
 	const directory = mkdtempSync(join(tmpdir(), "pi-toolbox-memory-"));
 	const databasePath = join(directory, "memory.sqlite");
 	const socketPath = join(directory, "memory.sock");
-	const server = new MemoryServer({ databasePath, socketPath });
+	const knowledgeBaseDirectory = join(directory, "knowledge");
+	mkdirSync(knowledgeBaseDirectory);
+	const server = new MemoryServer({
+		databasePath,
+		socketPath,
+		knowledgeBaseDirectory,
+		piInvocation: { command: process.execPath, args: ["-e", "process.exit(1)"] },
+	});
 	await server.start();
 	return { directory, databasePath, socketPath, server };
 }
