@@ -23,6 +23,7 @@ export class MemorySettingsStore {
 		mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 		const databaseExisted = databaseFileExists(path);
 		this.database = new Database(path);
+		this.database.pragma("journal_mode = WAL");
 		this.database.pragma("busy_timeout = 5000");
 		this.database.exec(SETTINGS_SCHEMA);
 		if (!databaseExisted) chmodSync(path, 0o600);

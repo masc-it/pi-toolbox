@@ -29,6 +29,20 @@ export interface MemoryConfig {
 	knowledgeBaseDirectory: string;
 }
 
+export interface MemoryServicePaths {
+	socketPath: string;
+	startupLockPath: string;
+	logPath: string;
+}
+
+export function createMemoryServicePaths(dataDirectory: string): MemoryServicePaths {
+	return {
+		socketPath: join(dataDirectory, "memory.sock"),
+		startupLockPath: join(dataDirectory, "memory.start.lock"),
+		logPath: join(dataDirectory, "memory-service.log"),
+	};
+}
+
 export function createMemoryConfig(
 	agentDirectory = getAgentDir(),
 	homeDirectory = homedir(),

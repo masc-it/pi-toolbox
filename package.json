@@ -17,7 +17,8 @@
     "LICENSE"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit"
+    "typecheck": "tsc --noEmit",
+    "test:memory-server": "node --experimental-transform-types --test tests/memory/*.test.ts"
   },
   "pi": {
     "extensions": [
