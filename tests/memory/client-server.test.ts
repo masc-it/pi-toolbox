@@ -1,6 +1,6 @@
 import assert from "node:assert/strict";
 import { randomUUID } from "node:crypto";
-import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -23,7 +23,6 @@ async function createService(): Promise<TestService> {
 	const databasePath = join(directory, "memory.sqlite");
 	const socketPath = join(directory, "memory.sock");
 	const knowledgeBaseDirectory = join(directory, "knowledge");
-	mkdirSync(knowledgeBaseDirectory);
 	const server = new MemoryServer({
 		databasePath,
 		socketPath,

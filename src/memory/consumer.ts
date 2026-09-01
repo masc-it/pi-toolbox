@@ -1,6 +1,5 @@
 import { MEMORY_BATCH_MAX_BYTES, MEMORY_BATCH_MAX_FACTS } from "./config.ts";
 import { MemoryCurator, type CuratorBatch, type CuratorResult } from "./curator.ts";
-import { acquireMemoryLock } from "./lock.ts";
 import { recordMemoryError, type MemoryErrorWriter } from "./log.ts";
 import type { PendingMemoryBatch } from "./queue.ts";
 
@@ -31,8 +30,6 @@ interface BatchRetryState {
 	retryAt: number | null;
 }
 
-type LockAcquirer = typeof acquireMemoryLock;
-
 export class MemoryConsumer {
 	private readonly abortController = new AbortController();
 	private readonly retries = new Map<string, BatchRetryState>();
@@ -46,8 +43,7 @@ export class MemoryConsumer {
 		private readonly queue: ConsumerQueue,
 		private readonly curator: ConsumerCurator,
 		private readonly repository: ConsumerRepository,
-		private readonly lockPath: string,
-		private readonly acquireLock: LockAcquirer = acquireMemoryLock,
+		private readonly becameIdle: () => void = () => undefined,
 	) {}
 
 	wake(): void {
@@ -62,13 +58,10 @@ export class MemoryConsumer {
 		const flight = this.run();
 		this.flight = flight;
 		void flight.finally(() => {
-			if (this.flight !== flight) {
-				return;
-			}
+			if (this.flight !== flight) return;
 			this.flight = null;
-			if (this.wakeRequested && !this.closed) {
-				this.wake();
-			}
+			this.becameIdle();
+			if (this.wakeRequested && !this.closed) this.wake();
 		});
 	}
 
@@ -96,29 +89,31 @@ export class MemoryConsumer {
 	}
 
 	private async drainQueue(): Promise<void> {
-		const lock = await this.acquireLock(this.lockPath, this.abortController.signal);
-		try {
-			while (!this.closed) {
-				const pending = this.queue.nextPendingBatch(MEMORY_BATCH_MAX_FACTS, this.excludedCwds());
-				if (!pending) {
-					this.scheduleNextBatchRetry();
-					return;
-				}
-				const batch = buildBoundedBatch(pending);
-				try {
-					await this.processBatch(batch);
-					this.retries.delete(batch.cwd);
-				} catch (error) {
-					if (this.closed && isMemoryConsumerAbort(error)) {
-						throw error.cause;
-					}
-					const retry = this.recordBatchFailure(batch.cwd);
-					logConsumerFailure(this.queue, error, retry);
-				}
+		while (!this.closed) {
+			const pending = this.queue.nextPendingBatch(MEMORY_BATCH_MAX_FACTS, this.excludedCwds());
+			if (!pending) {
+				this.scheduleNextBatchRetry();
+				return;
 			}
-		} finally {
-			lock.release();
+			try {
+				await this.processPendingBatch(pending);
+				this.retries.delete(pending.cwd);
+			} catch (error) {
+				if (this.closed && isMemoryConsumerAbort(error)) throw error.cause;
+				const retry = this.recordBatchFailure(pending.cwd);
+				logConsumerFailure(this.queue, error, retry);
+			}
 		}
+	}
+
+	private async processPendingBatch(pending: PendingMemoryBatch): Promise<void> {
+		let batch: CuratorBatch;
+		try {
+			batch = buildBoundedBatch(pending);
+		} catch (error) {
+			throw new MemoryConsumerFailure("batch", { cwd: pending.cwd, rows: pending.rows }, error);
+		}
+		await this.processBatch(batch);
 	}
 
 	private async processBatch(batch: CuratorBatch): Promise<void> {

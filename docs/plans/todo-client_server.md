@@ -322,21 +322,21 @@ QA checkpoint:
 
 ## Phase 3: Fact producer and curation consumer
 
-- [todo] Wake one curation consumer after the extraction transaction commits.
-- [todo] Drain pending `memory_queue` rows until no batch remains.
-- [todo] Preserve FIFO `cwd` selection, row ordering, fact-count limits, and byte limits.
-- [todo] Reuse the existing curator, repository validation, commit, no-op, rollback, and retry flow.
-- [todo] Continue accepting and persisting client events while curation runs.
-- [todo] Remove per-session consumers and the cross-process repository lock.
+- [done] Wake one curation consumer after the extraction transaction commits.
+- [done] Drain pending `memory_queue` rows until no batch remains.
+- [done] Preserve FIFO `cwd` selection, row ordering, fact-count limits, and byte limits.
+- [done] Reuse the existing curator, repository validation, commit, no-op, rollback, and retry flow.
+- [done] Continue accepting and persisting client events while curation runs.
+- [done] Remove per-session consumers and the cross-process repository lock.
 
 QA checkpoint:
 
-- [todo] Produce facts from multiple sessions during one curator run and confirm they remain queued for later batches.
-- [todo] Open multiple clients with facts for the same `cwd` and confirm one consumer processes each batch.
-- [todo] Fail one `cwd` and confirm another working directory continues while it waits.
-- [todo] Lose a facts-ready wake, restart the curation consumer, and confirm startup draining processes the rows.
-- [todo] Confirm queue rows are completed only after a Git commit or confirmed no-op.
-- [todo] Confirm capture and status requests complete while the curator runs.
+- [done] Produce facts from multiple sessions during one curator run and confirm they remain queued for later batches.
+- [done] Open multiple clients with facts for the same `cwd` and confirm one consumer processes each batch.
+- [done] Fail one `cwd` and confirm another working directory continues while it waits.
+- [done] Lose a facts-ready wake, restart the curation consumer, and confirm startup draining processes the rows.
+- [done] Confirm queue rows are completed only after a Git commit or confirmed no-op.
+- [done] Confirm capture and status requests complete while the curator runs.
 
 ## Phase 4: Cutover and removal of session workers
 

@@ -1,10 +1,7 @@
 import { MessagePort, parentPort, workerData } from "node:worker_threads";
 import { resolveMemoryRoutingContext } from "./collections.ts";
-import { MemoryConsumer } from "./consumer.ts";
-import { MemoryCurator } from "./curator.ts";
 import { recordMemoryError } from "./log.ts";
 import { MemoryQueue, type OpenMemoryExchange } from "./queue.ts";
-import { MemoryRepository } from "./repository.ts";
 import type {
 	MemoryWorkerConfig,
 	MemoryWorkerRequest,
@@ -14,36 +11,11 @@ import type {
 
 class MemoryWorkerRuntime {
 	private readonly queue: MemoryQueue;
-	private readonly consumer: MemoryConsumer | null;
 	private activeExchange: OpenMemoryExchange | null = null;
 	private closed = false;
 
 	constructor(private readonly config: MemoryWorkerConfig) {
 		this.queue = new MemoryQueue(config.databasePath);
-
-		let consumer: MemoryConsumer | null = null;
-		try {
-			const repository = new MemoryRepository(config.knowledgeBaseDirectory);
-			consumer = new MemoryConsumer(
-				this.queue,
-				new MemoryCurator((args) => ({
-					command: config.piInvocation.command,
-					args: [...config.piInvocation.args, ...args],
-				})),
-				repository,
-				`${config.databasePath}.lock`,
-			);
-			consumer.wake();
-		} catch (error) {
-			recordMemoryError(this.queue, {
-				component: "memory",
-				stage: "consumer-start",
-				pi_session_id: config.piSessionId,
-				cwd: config.cwd,
-				error: formatError(error),
-			});
-		}
-		this.consumer = consumer;
 	}
 
 	handle(request: MemoryWorkerRequest): unknown | Promise<unknown> {
@@ -59,9 +31,7 @@ class MemoryWorkerRuntime {
 				return this.nextExtraction();
 			case "complete-extraction": {
 				const { exchange, facts, extractedAt } = request.params;
-				const ids = this.queue.completeExtraction(exchange, facts, extractedAt);
-				if (ids.length > 0) this.consumer?.wake();
-				return ids;
+				return this.queue.completeExtraction(exchange, facts, extractedAt);
 			}
 			case "log-error":
 				recordMemoryError(this.queue, request.params);
@@ -106,11 +76,7 @@ class MemoryWorkerRuntime {
 	private async close(): Promise<null> {
 		if (this.closed) return null;
 		this.closed = true;
-		if (this.consumer) {
-			await this.consumer.close();
-		} else {
-			this.queue.close();
-		}
+		this.queue.close();
 		return null;
 	}
 

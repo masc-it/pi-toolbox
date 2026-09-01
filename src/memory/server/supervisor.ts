@@ -48,7 +48,13 @@ export class MemoryConsumerSupervisor {
 					piInvocation: config.piInvocation,
 				}),
 			}),
-			curation: createSlot("curation", entries.curation, {}),
+			curation: createSlot("curation", entries.curation, {
+				PI_TOOLBOX_MEMORY_CURATION_CONFIG: JSON.stringify({
+					databasePath: config.databasePath,
+					knowledgeBaseDirectory: config.knowledgeBaseDirectory,
+					piInvocation: config.piInvocation,
+				}),
+			}),
 		};
 	}
 

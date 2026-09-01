@@ -38,7 +38,6 @@ async function createService(extractor: ExtractionFixtureConfig, graceMs = 100):
 	const attemptsPath = join(directory, "attempts");
 	const extractorConfigPath = join(directory, "extractor.json");
 	mkdirSync(projectDirectory);
-	mkdirSync(join(knowledgeBaseDirectory, "projects"), { recursive: true });
 	writeFileSync(extractorConfigPath, JSON.stringify({ ...extractor, attemptsPath }));
 	const serverConfig = {
 		databasePath,
