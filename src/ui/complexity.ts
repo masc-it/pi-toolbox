@@ -1,6 +1,6 @@
 import type { Theme } from "@earendil-works/pi-coding-agent";
 import { Key, matchesKey, wrapTextWithAnsi } from "@earendil-works/pi-tui";
-import { ComplexityCancelledError, type ComplexityResult } from "../workflows/complexity.ts";
+import { ComplexityCancelledError, type ComplexityResult } from "../workflows/complexity-runner.ts";
 import type { ToolboxScreen, ToolboxScreenHost } from "./screen.ts";
 
 type ComplexityMode = "running" | "failed" | "completed";
@@ -9,6 +9,7 @@ interface ComplexityScreenOptions {
 	host: ToolboxScreenHost;
 	theme: Theme;
 	cwd: string;
+	runningLabel: string;
 	analyze: (cwd: string, signal: AbortSignal) => Promise<ComplexityResult>;
 	onComplete: (report: string) => void;
 }
@@ -29,7 +30,7 @@ export class ComplexityScreen implements ToolboxScreen {
 	render(width: number): string[] {
 		if (this.mode === "running") {
 			return [
-				this.options.theme.fg("accent", "Analysing repository Python files with uv…"),
+				this.options.theme.fg("accent", this.options.runningLabel),
 				"",
 				this.options.theme.fg("accent", "[ Cancel ]"),
 				"",

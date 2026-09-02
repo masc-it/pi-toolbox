@@ -24,6 +24,8 @@ interface RunProcessOptions {
 	maxStdoutBytes?: number;
 	stdoutLimitError?: () => Error;
 	maxStderrBytes?: number;
+	timeoutMs?: number;
+	timeoutError?: () => Error;
 	collectStdout?: boolean;
 	onStdoutChunk?: (chunk: Buffer) => void;
 }
@@ -46,11 +48,13 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
 		let stderrTruncated = false;
 		let terminalError: Error | null = null;
 		let killTimer: NodeJS.Timeout | null = null;
+		let timeoutTimer: NodeJS.Timeout | null = null;
 		let settled = false;
 
 		const cleanup = () => {
 			options.signal.removeEventListener("abort", abort);
 			if (killTimer) clearTimeout(killTimer);
+			if (timeoutTimer) clearTimeout(timeoutTimer);
 		};
 		const finishError = (error: Error) => {
 			if (settled) return;
@@ -59,7 +63,7 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
 			reject(error);
 		};
 		const terminate = (error: Error) => {
-			if (terminalError) return;
+			if (terminalError || settled) return;
 			terminalError = error;
 			if (child.exitCode !== null || child.signalCode !== null) return;
 			child.kill("SIGTERM");
@@ -110,6 +114,12 @@ export function runProcess(options: RunProcessOptions): Promise<ProcessResult> {
 		});
 
 		options.signal.addEventListener("abort", abort, { once: true });
+		if (options.timeoutMs !== undefined) {
+			timeoutTimer = setTimeout(
+				() => terminate(options.timeoutError?.() ?? new Error("Process exceeded its time limit")),
+				options.timeoutMs,
+			);
+		}
 		if (options.signal.aborted) abort();
 	});
 }

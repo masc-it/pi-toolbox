@@ -557,24 +557,26 @@ The unconfigured React repository selected tracked third-party assets. Calibrati
 
 ## Phase 3: Process workflow and screen reuse
 
-- [todo] Extract shared complexity result, cancellation, file validation, and output handling.
-- [todo] Preserve the Python workflow's `uv` invocation and user-facing failures.
-- [todo] Add the JavaScript and TypeScript workflow using `process.execPath` and `shell: false`.
-- [todo] Map analyzer exit codes to language-specific errors.
-- [todo] Enforce the five-minute JavaScript and TypeScript analysis timeout through the existing termination sequence.
-- [todo] Add the fixed JavaScript and TypeScript refactoring prompt.
-- [todo] Parameterize the complexity screen's running text without duplicating its state machine.
+- [done] Extract shared complexity result, cancellation, file validation, and output handling.
+- [done] Preserve the Python workflow's `uv` invocation and user-facing failures.
+- [done] Add the JavaScript and TypeScript workflow using `process.execPath` and `shell: false`.
+- [done] Map analyzer exit codes to language-specific errors.
+- [done] Enforce the five-minute JavaScript and TypeScript analysis timeout through the existing termination sequence.
+- [done] Add the fixed JavaScript and TypeScript refactoring prompt.
+- [done] Parameterize the complexity screen's running text without duplicating its state machine.
 
 QA checkpoint:
 
-- [todo] Run both workflows from repository paths containing spaces and Unicode.
-- [todo] Confirm each workflow returns analyzer output unchanged.
-- [todo] Cancel each workflow and confirm no child process remains.
-- [todo] Force each analyzer exit code and verify its displayed reason.
-- [todo] Exceed the wall-clock limit and confirm timeout termination leaves no child process.
-- [todo] Reject empty output and standard output above 50 KB.
-- [todo] Truncate excessive standard error without hiding the exit code.
-- [todo] Re-run the Python analyzer workflow and compare its report and failure behavior before and after the refactor.
+- [done] Run both workflows from repository paths containing spaces and Unicode.
+- [done] Confirm each workflow returns analyzer output unchanged.
+- [done] Cancel each workflow and confirm no child process remains.
+- [done] Force each analyzer exit code and verify its displayed reason.
+- [done] Exceed the wall-clock limit and confirm timeout termination leaves no child process.
+- [done] Reject empty output and standard output above 50 KB.
+- [done] Truncate excessive standard error without hiding the exit code.
+- [done] Re-run the Python analyzer workflow and compare its report and failure behavior before and after the refactor.
+
+The Python report for this repository remained byte-identical before and after the refactor: SHA-256 `98719dcb3aa9b5cf8bca14d6ae3a6e955b58dcbb8b2fd5a873bcaa2f978edbdd`. Workflow tests also compare both language workflows with direct analyzer output.
 
 ## Phase 4: Toolbox integration and packaging
 

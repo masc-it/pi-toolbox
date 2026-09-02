@@ -74,6 +74,7 @@ export function createToolboxScreens(dependencies: ToolboxScreenDependencies): T
 				host,
 				theme,
 				cwd: ctx.cwd,
+				runningLabel: "Analysing repository Python files with uv…",
 				analyze: analyzeRepository,
 				onComplete: (report) => {
 					const prompt = buildComplexityPrompt(report);
