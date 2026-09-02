@@ -35,15 +35,43 @@ const EXCLUDED_DIRECTORIES = new Set([
 	".svelte-kit",
 	".turbo",
 	".vite",
+	".venv",
 	".yarn",
 	"build",
 	"coverage",
 	"dist",
 	"node_modules",
 	"out",
+	"site-packages",
+	"venv",
 ]);
 const TEST_DIRECTORIES = new Set(["test", "tests", "__tests__"]);
 const UTF8_DECODER = new TextDecoder("utf-8", { fatal: true });
+const SOFT_LIMITS = Object.freeze({
+	cyclomaticComplexity: 4,
+	maxNestingDepth: 2,
+	logicalLineCount: 20,
+	parameterCount: 4,
+	localBindingCount: 8,
+	moduleLogicalLineCount: 250,
+});
+const HARD_LIMITS = Object.freeze({
+	cyclomaticComplexity: 10,
+	maxNestingDepth: 4,
+	logicalLineCount: 40,
+	parameterCount: 6,
+});
+const TOP_LEVEL_IMPERATIVE_PENALTY = 0.25;
+const MAX_SCORED_TOP_LEVEL_IMPERATIVE_STATEMENTS = 20;
+const MAX_REPORTED_TOP_LEVEL_IMPERATIVE_SPANS = 10;
+const DECISION_OPERATORS = new Set([
+	ts.SyntaxKind.AmpersandAmpersandToken,
+	ts.SyntaxKind.BarBarToken,
+	ts.SyntaxKind.QuestionQuestionToken,
+	ts.SyntaxKind.AmpersandAmpersandEqualsToken,
+	ts.SyntaxKind.BarBarEqualsToken,
+	ts.SyntaxKind.QuestionQuestionEqualsToken,
+]);
 
 class AnalyzerError extends Error {
 	constructor(message, exitCode) {
@@ -94,15 +122,19 @@ export async function inspectRepository(repoRootInput, options = {}) {
 		throw new NoFilesError(`No production JavaScript or TypeScript files found under ${displayValue(root)}`);
 	}
 	enforceRepositoryLimits(files, limits);
-	await parseSourceFiles(files, limits);
-	return { root, files };
+	const metrics = await parseSourceFiles(files, limits);
+	return { root, files, metrics };
 }
 
 export async function run(argv, options = {}) {
+	const stdout = options.stdout ?? process.stdout;
 	const stderr = options.stderr ?? process.stderr;
 	try {
 		const { repoRoot } = parseArguments(argv);
-		await inspectRepository(repoRoot, { limits: options.limits ?? DEFAULT_LIMITS });
+		const { metrics } = await inspectRepository(repoRoot, { limits: options.limits ?? DEFAULT_LIMITS });
+		const ranked = rankFiles(metrics);
+		if (ranked.length === 0) throw new Error("Repository ranking is empty after successful analysis");
+		stdout.write(renderReport(ranked[0]));
 		return 0;
 	} catch (error) {
 		if (error instanceof AnalyzerError) {
@@ -371,6 +403,7 @@ export function enforceRepositoryLimits(files, limits = DEFAULT_LIMITS) {
 }
 
 export async function parseSourceFiles(files, limits = DEFAULT_LIMITS) {
+	const metrics = [];
 	let totalBytes = 0;
 	for (const file of files) {
 		let buffer;
@@ -407,6 +440,800 @@ export async function parseSourceFiles(files, limits = DEFAULT_LIMITS) {
 		);
 		const diagnostic = parsed.parseDiagnostics[0];
 		if (diagnostic) throw new AnalysisError(file.relativePath, formatParseDiagnostic(parsed, diagnostic));
+		metrics.push(analyzeSourceFile(file.relativePath, parsed));
+	}
+	return metrics;
+}
+
+export function analyzeSourceFile(relativePath, sourceFile) {
+	const scopes = collectExecutableScopes(sourceFile);
+	const topLevelImperativeSpans = collectTopLevelImperativeSpans(sourceFile);
+	const moduleLogicalLineCount = collectModuleLogicalLines(sourceFile);
+	const hardLimitViolationCount = countHardLimitViolations(scopes);
+	const qualityScore = scoreFile(scopes, moduleLogicalLineCount, topLevelImperativeSpans.length);
+	let highestComplexity = 0;
+	let deepestNesting = 0;
+	let largestNonModuleScope = 0;
+	for (const scope of scopes) {
+		highestComplexity = Math.max(highestComplexity, scope.cyclomaticComplexity);
+		deepestNesting = Math.max(deepestNesting, scope.maxNestingDepth);
+		if (scope.scopeKind !== "module") {
+			largestNonModuleScope = Math.max(largestNonModuleScope, scope.logicalLineCount);
+		}
+	}
+	const metrics = {
+		path: relativePath,
+		moduleLogicalLineCount,
+		topLevelImperativeSpans,
+		scopes,
+		qualityScore,
+		hardLimitViolationCount,
+		highestComplexity,
+		deepestNesting,
+		largestNonModuleScope,
+	};
+	validateFileMetrics(metrics);
+	return metrics;
+}
+
+function collectExecutableScopes(sourceFile) {
+	const scopes = [];
+	const moduleDescriptor = {
+		scopeKind: "module",
+		syntaxKind: null,
+		role: null,
+		name: "<module>",
+		qualifiedName: "<module>",
+		startLine: 1,
+		endLine: lineAtEnd(sourceFile, sourceFile),
+		parameterCount: null,
+		localBindingCount: null,
+	};
+	scopes.push(analyzeScope(sourceFile, moduleDescriptor, sourceFile));
+
+	for (const statement of sourceFile.statements) collectNestedScopes(statement, [], sourceFile, scopes);
+	return scopes;
+}
+
+function collectNestedScopes(node, containers, sourceFile, scopes) {
+	if (isCallableWithBody(node)) {
+		const identity = inferCallableIdentity(node, sourceFile);
+		const qualifiedName = joinQualifiedName(containers, identity.name);
+		const descriptor = {
+			scopeKind: "callable",
+			syntaxKind: callableSyntaxKind(node),
+			role: identity.role,
+			name: identity.name,
+			qualifiedName,
+			...nodeSpan(node, sourceFile),
+			parameterCount: countParameters(node),
+			localBindingCount: 0,
+		};
+		scopes.push(analyzeScope(node, descriptor, sourceFile));
+		const nestedContainers = [...containers, identity.name];
+		for (const decorator of nodeDecorators(node)) collectNestedScopes(decorator.expression, nestedContainers, sourceFile, scopes);
+		for (const parameter of node.parameters) {
+			for (const decorator of nodeDecorators(parameter)) {
+				collectNestedScopes(decorator.expression, nestedContainers, sourceFile, scopes);
+			}
+			if (parameter.initializer) collectNestedScopes(parameter.initializer, nestedContainers, sourceFile, scopes);
+		}
+		collectNestedScopes(node.body, nestedContainers, sourceFile, scopes);
+		return;
+	}
+
+	if (ts.isClassStaticBlockDeclaration(node)) {
+		const startLine = lineAtStart(node, sourceFile);
+		const name = `<static@L${startLine}>`;
+		const descriptor = {
+			scopeKind: "static-block",
+			syntaxKind: null,
+			role: null,
+			name,
+			qualifiedName: joinQualifiedName(containers, name),
+			...nodeSpan(node, sourceFile),
+			parameterCount: null,
+			localBindingCount: 0,
+		};
+		scopes.push(analyzeScope(node, descriptor, sourceFile));
+		collectNestedScopes(node.body, [...containers, name], sourceFile, scopes);
+		return;
+	}
+
+	if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+		const className = inferClassName(node, sourceFile);
+		const nestedContainers = [...containers, className];
+		for (const decorator of nodeDecorators(node)) collectNestedScopes(decorator.expression, nestedContainers, sourceFile, scopes);
+		for (const clause of node.heritageClauses ?? []) {
+			for (const type of clause.types) collectNestedScopes(type.expression, nestedContainers, sourceFile, scopes);
+		}
+		for (const member of node.members) {
+			for (const decorator of nodeDecorators(member)) {
+				collectNestedScopes(decorator.expression, nestedContainers, sourceFile, scopes);
+			}
+			if (member.name && ts.isComputedPropertyName(member.name)) {
+				collectNestedScopes(member.name.expression, nestedContainers, sourceFile, scopes);
+			}
+			if (ts.isClassStaticBlockDeclaration(member) || isCallableWithBody(member)) {
+				collectNestedScopes(member, nestedContainers, sourceFile, scopes);
+			} else if (ts.isPropertyDeclaration(member) && member.initializer) {
+				collectNestedScopes(member.initializer, nestedContainers, sourceFile, scopes);
+			}
+		}
+		return;
+	}
+
+	if (ts.isModuleDeclaration(node)) {
+		const namespaceName = propertyNameText(node.name, sourceFile);
+		if (node.body) collectNestedScopes(node.body, [...containers, namespaceName], sourceFile, scopes);
+		return;
+	}
+
+	if (ts.isObjectLiteralExpression(node)) {
+		const objectName = inferAssignedExpressionName(node, sourceFile);
+		const nestedContainers = objectName ? [...containers, objectName] : containers;
+		ts.forEachChild(node, (child) => collectNestedScopes(child, nestedContainers, sourceFile, scopes));
+		return;
+	}
+
+	ts.forEachChild(node, (child) => collectNestedScopes(child, containers, sourceFile, scopes));
+}
+
+function analyzeScope(root, descriptor, sourceFile) {
+	const state = {
+		cyclomaticComplexity: 1,
+		maxNestingDepth: 0,
+		nestingDepth: 0,
+		logicalLines: new Set(),
+		localBindings: new Set(),
+	};
+
+	if (root === sourceFile) {
+		for (const statement of sourceFile.statements) visitScopeNode(statement, root, sourceFile, state);
+	} else if (isCallableWithBody(root)) {
+		if (ts.isBlock(root.body)) {
+			for (const statement of root.body.statements) visitScopeNode(statement, root, sourceFile, state);
+		} else {
+			state.logicalLines.add(lineAtStart(root.body, sourceFile));
+			visitScopeNode(root.body, root, sourceFile, state);
+		}
+	} else {
+		for (const statement of root.body.statements) visitScopeNode(statement, root, sourceFile, state);
+	}
+
+	const metrics = {
+		...descriptor,
+		cyclomaticComplexity: state.cyclomaticComplexity,
+		maxNestingDepth: state.maxNestingDepth,
+		logicalLineCount: state.logicalLines.size,
+		localBindingCount: descriptor.localBindingCount === null ? null : state.localBindings.size,
+		qualityScore: 100,
+	};
+	metrics.qualityScore = scoreScope(metrics);
+	return metrics;
+}
+
+function visitScopeNode(node, root, sourceFile, state) {
+	if (node !== root && isCallableWithBody(node)) {
+		state.logicalLines.add(lineAtStart(node, sourceFile));
+		if (ts.isFunctionDeclaration(node) && node.name) state.localBindings.add(node.name.text);
+		return;
+	}
+	if (node !== root && ts.isClassStaticBlockDeclaration(node)) return;
+	if (isTypeOnlyRuntimeNode(node)) return;
+
+	if (isCountedStatement(node)) state.logicalLines.add(lineAtStart(node, sourceFile));
+	if (ts.isVariableDeclaration(node)) collectBindingNames(node.name, state.localBindings);
+	if (ts.isClassDeclaration(node) && node.name) state.localBindings.add(node.name.text);
+
+	if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) {
+		visitClassRuntimeExpressions(node, root, sourceFile, state);
+		return;
+	}
+	if (ts.isIfStatement(node)) {
+		state.cyclomaticComplexity += 1;
+		visitScopeNode(node.expression, root, sourceFile, state);
+		visitNested(node.thenStatement, root, sourceFile, state);
+		if (node.elseStatement) {
+			if (ts.isIfStatement(node.elseStatement)) visitScopeNode(node.elseStatement, root, sourceFile, state);
+			else visitNested(node.elseStatement, root, sourceFile, state);
+		}
+		return;
+	}
+	if (ts.isForStatement(node)) {
+		state.cyclomaticComplexity += 1;
+		if (node.initializer) visitScopeNode(node.initializer, root, sourceFile, state);
+		if (node.condition) visitScopeNode(node.condition, root, sourceFile, state);
+		if (node.incrementor) visitScopeNode(node.incrementor, root, sourceFile, state);
+		visitNested(node.statement, root, sourceFile, state);
+		return;
+	}
+	if (ts.isForInStatement(node) || ts.isForOfStatement(node)) {
+		state.cyclomaticComplexity += 1;
+		visitScopeNode(node.initializer, root, sourceFile, state);
+		visitScopeNode(node.expression, root, sourceFile, state);
+		visitNested(node.statement, root, sourceFile, state);
+		return;
+	}
+	if (ts.isWhileStatement(node) || ts.isDoStatement(node)) {
+		state.cyclomaticComplexity += 1;
+		visitScopeNode(node.expression, root, sourceFile, state);
+		visitNested(node.statement, root, sourceFile, state);
+		return;
+	}
+	if (ts.isSwitchStatement(node)) {
+		state.cyclomaticComplexity += node.caseBlock.clauses.filter(ts.isCaseClause).length;
+		visitScopeNode(node.expression, root, sourceFile, state);
+		withNesting(state, () => {
+			for (const clause of node.caseBlock.clauses) {
+				if (ts.isCaseClause(clause)) visitScopeNode(clause.expression, root, sourceFile, state);
+				for (const statement of clause.statements) visitScopeNode(statement, root, sourceFile, state);
+			}
+		});
+		return;
+	}
+	if (ts.isTryStatement(node)) {
+		visitNested(node.tryBlock, root, sourceFile, state);
+		if (node.catchClause) {
+			state.cyclomaticComplexity += 1;
+			if (node.catchClause.variableDeclaration) {
+				collectBindingNames(node.catchClause.variableDeclaration.name, state.localBindings);
+			}
+			visitNested(node.catchClause.block, root, sourceFile, state);
+		}
+		if (node.finallyBlock) visitNested(node.finallyBlock, root, sourceFile, state);
+		return;
+	}
+	if (ts.isConditionalExpression(node)) {
+		state.cyclomaticComplexity += 1;
+		ts.forEachChild(node, (child) => visitScopeNode(child, root, sourceFile, state));
+		return;
+	}
+	if (ts.isBinaryExpression(node) && DECISION_OPERATORS.has(node.operatorToken.kind)) {
+		state.cyclomaticComplexity += 1;
+	}
+	ts.forEachChild(node, (child) => visitScopeNode(child, root, sourceFile, state));
+}
+
+function visitNested(node, root, sourceFile, state) {
+	withNesting(state, () => visitScopeNode(node, root, sourceFile, state));
+}
+
+function withNesting(state, callback) {
+	state.nestingDepth += 1;
+	state.maxNestingDepth = Math.max(state.maxNestingDepth, state.nestingDepth);
+	try {
+		callback();
+	} finally {
+		state.nestingDepth -= 1;
+	}
+}
+
+function visitClassRuntimeExpressions(node, root, sourceFile, state) {
+	for (const decorator of nodeDecorators(node)) visitScopeNode(decorator.expression, root, sourceFile, state);
+	for (const clause of node.heritageClauses ?? []) {
+		for (const type of clause.types) visitScopeNode(type.expression, root, sourceFile, state);
+	}
+	for (const member of node.members) {
+		for (const decorator of nodeDecorators(member)) visitScopeNode(decorator.expression, root, sourceFile, state);
+		if (member.name && ts.isComputedPropertyName(member.name)) {
+			visitScopeNode(member.name.expression, root, sourceFile, state);
+		}
+		if (isStaticMember(member) && ts.isPropertyDeclaration(member) && member.initializer) {
+			visitScopeNode(member.initializer, root, sourceFile, state);
+		}
+	}
+}
+
+function collectBindingNames(name, bindings) {
+	if (ts.isIdentifier(name)) {
+		bindings.add(name.text);
+		return;
+	}
+	for (const element of name.elements) {
+		if (!ts.isOmittedExpression(element)) collectBindingNames(element.name, bindings);
+	}
+}
+
+function countParameters(node) {
+	return node.parameters.filter(
+		(parameter) => !(ts.isIdentifier(parameter.name) && parameter.name.text === "this"),
+	).length;
+}
+
+function isCallableWithBody(node) {
+	return (
+		(ts.isFunctionDeclaration(node) ||
+			ts.isFunctionExpression(node) ||
+			ts.isArrowFunction(node) ||
+			ts.isMethodDeclaration(node) ||
+			ts.isConstructorDeclaration(node) ||
+			ts.isGetAccessorDeclaration(node) ||
+			ts.isSetAccessorDeclaration(node)) &&
+		node.body !== undefined
+	);
+}
+
+function callableSyntaxKind(node) {
+	if (ts.isArrowFunction(node)) return "arrow";
+	if (ts.isMethodDeclaration(node)) return "method";
+	if (ts.isConstructorDeclaration(node)) return "constructor";
+	if (ts.isGetAccessorDeclaration(node)) return "getter";
+	if (ts.isSetAccessorDeclaration(node)) return "setter";
+	return "function";
+}
+
+function inferCallableIdentity(node, sourceFile) {
+	if (ts.isFunctionDeclaration(node)) {
+		const name = node.name?.text ?? (hasModifier(node, ts.SyntaxKind.DefaultKeyword) ? "default" : anonymousName("anonymous", node, sourceFile));
+		return { name, role: "declaration" };
+	}
+	if (
+		ts.isMethodDeclaration(node) ||
+		ts.isConstructorDeclaration(node) ||
+		ts.isGetAccessorDeclaration(node) ||
+		ts.isSetAccessorDeclaration(node)
+	) {
+		const name = ts.isConstructorDeclaration(node) ? "constructor" : propertyNameText(node.name, sourceFile);
+		return { name, role: "declaration" };
+	}
+
+	const context = expressionContext(node);
+	const assignedName = assignedNameFromContext(context.expression, context.parent, sourceFile);
+	if (assignedName) return { name: assignedName, role: "assigned" };
+	if (context.parent && (ts.isCallExpression(context.parent) || ts.isNewExpression(context.parent))) {
+		if (context.parent.expression === context.expression) {
+			return {
+				name: node.name?.text ?? anonymousName("anonymous", node, sourceFile),
+				role: "immediate",
+			};
+		}
+		if (context.parent.arguments?.includes(context.expression)) {
+			return {
+				name: node.name?.text ?? anonymousName("callback", node, sourceFile),
+				role: "callback",
+			};
+		}
+	}
+	return { name: node.name?.text ?? anonymousName("anonymous", node, sourceFile), role: "anonymous" };
+}
+
+function expressionContext(node) {
+	let expression = node;
+	let parent = node.parent;
+	while (parent && isTransparentExpression(parent, expression)) {
+		expression = parent;
+		parent = parent.parent;
+	}
+	return { expression, parent };
+}
+
+function isTransparentExpression(parent, child) {
+	return (
+		((ts.isParenthesizedExpression(parent) ||
+			ts.isAsExpression(parent) ||
+			ts.isTypeAssertionExpression(parent) ||
+			ts.isNonNullExpression(parent) ||
+			ts.isSatisfiesExpression(parent)) &&
+			parent.expression === child) ||
+		(ts.isJsxExpression(parent) && parent.expression === child)
+	);
+}
+
+function assignedNameFromContext(expression, parent, sourceFile) {
+	if (!parent) return null;
+	if (ts.isVariableDeclaration(parent) && parent.initializer === expression) {
+		return bindingNameText(parent.name, sourceFile);
+	}
+	if (
+		(ts.isPropertyAssignment(parent) || ts.isPropertyDeclaration(parent) || ts.isJsxAttribute(parent)) &&
+		parent.initializer === expression
+	) {
+		return propertyNameText(parent.name, sourceFile);
+	}
+	if (ts.isBinaryExpression(parent) && parent.right === expression && isAssignmentOperator(parent.operatorToken.kind)) {
+		return safeExpressionName(parent.left, sourceFile);
+	}
+	if (ts.isExportAssignment(parent) && parent.expression === expression) return "default";
+	return null;
+}
+
+function inferAssignedExpressionName(node, sourceFile) {
+	const context = expressionContext(node);
+	return assignedNameFromContext(context.expression, context.parent, sourceFile);
+}
+
+function inferClassName(node, sourceFile) {
+	if (node.name) return node.name.text;
+	if (hasModifier(node, ts.SyntaxKind.DefaultKeyword)) return "default";
+	return inferAssignedExpressionName(node, sourceFile) ?? anonymousName("anonymous-class", node, sourceFile);
+}
+
+function bindingNameText(name, sourceFile) {
+	return ts.isIdentifier(name) ? name.text : `<computed@L${lineAtStart(name, sourceFile)}>`;
+}
+
+function propertyNameText(name, sourceFile) {
+	if (ts.isIdentifier(name) || ts.isPrivateIdentifier(name)) return name.text;
+	if (ts.isStringLiteral(name)) return JSON.stringify(name.text);
+	if (ts.isNumericLiteral(name)) return name.text;
+	return `<computed@L${lineAtStart(name, sourceFile)}>`;
+}
+
+function safeExpressionName(node, sourceFile) {
+	if (ts.isIdentifier(node)) return node.text;
+	if (node.kind === ts.SyntaxKind.ThisKeyword) return "this";
+	if (node.kind === ts.SyntaxKind.SuperKeyword) return "super";
+	if (ts.isPropertyAccessExpression(node)) {
+		const left = safeExpressionName(node.expression, sourceFile);
+		return left ? `${left}.${propertyNameText(node.name, sourceFile)}` : null;
+	}
+	if (ts.isElementAccessExpression(node) && node.argumentExpression) {
+		const left = safeExpressionName(node.expression, sourceFile);
+		if (!left) return null;
+		if (ts.isStringLiteral(node.argumentExpression) || ts.isNumericLiteral(node.argumentExpression)) {
+			return `${left}[${JSON.stringify(node.argumentExpression.text)}]`;
+		}
+	}
+	return `<computed@L${lineAtStart(node, sourceFile)}>`;
+}
+
+function anonymousName(label, node, sourceFile) {
+	return `<${label}@L${lineAtStart(node, sourceFile)}>`;
+}
+
+function joinQualifiedName(containers, name) {
+	return [...containers, name].join(".");
+}
+
+function nodeDecorators(node) {
+	return ts.canHaveDecorators(node) ? (ts.getDecorators(node) ?? []) : [];
+}
+
+function isStaticMember(node) {
+	return hasModifier(node, ts.SyntaxKind.StaticKeyword);
+}
+
+function hasModifier(node, kind) {
+	return ts.canHaveModifiers(node) && (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === kind);
+}
+
+function isAssignmentOperator(kind) {
+	return kind >= ts.SyntaxKind.FirstAssignment && kind <= ts.SyntaxKind.LastAssignment;
+}
+
+function isCountedStatement(node) {
+	return ts.isStatement(node) && !ts.isBlock(node) && !ts.isEmptyStatement(node) && !isTypeOnlyRuntimeNode(node);
+}
+
+function isCountedDeclaration(node) {
+	return (
+		ts.isPropertyDeclaration(node) ||
+		ts.isMethodDeclaration(node) ||
+		ts.isConstructorDeclaration(node) ||
+		ts.isGetAccessorDeclaration(node) ||
+		ts.isSetAccessorDeclaration(node) ||
+		ts.isClassStaticBlockDeclaration(node)
+	);
+}
+
+function isTypeOnlyRuntimeNode(node) {
+	if (ts.isInterfaceDeclaration(node) || ts.isTypeAliasDeclaration(node)) return true;
+	if (hasDeclareModifier(node)) return true;
+	if (ts.isFunctionDeclaration(node) && !node.body) return true;
+	if (ts.isImportDeclaration(node)) return isTypeOnlyImport(node);
+	if (ts.isImportEqualsDeclaration(node)) return node.isTypeOnly;
+	if (ts.isExportDeclaration(node)) return isTypeOnlyExport(node);
+	return false;
+}
+
+function hasDeclareModifier(node) {
+	return ts.canHaveModifiers(node)
+		? (ts.getModifiers(node) ?? []).some((modifier) => modifier.kind === ts.SyntaxKind.DeclareKeyword)
+		: false;
+}
+
+function isTypeOnlyImport(node) {
+	const clause = node.importClause;
+	if (!clause) return false;
+	if (clause.isTypeOnly) return true;
+	return (
+		!clause.name &&
+		clause.namedBindings !== undefined &&
+		ts.isNamedImports(clause.namedBindings) &&
+		clause.namedBindings.elements.length > 0 &&
+		clause.namedBindings.elements.every((element) => element.isTypeOnly)
+	);
+}
+
+function isTypeOnlyExport(node) {
+	if (node.isTypeOnly) return true;
+	return (
+		node.exportClause !== undefined &&
+		ts.isNamedExports(node.exportClause) &&
+		node.exportClause.elements.length > 0 &&
+		node.exportClause.elements.every((element) => element.isTypeOnly)
+	);
+}
+
+function collectModuleLogicalLines(sourceFile) {
+	const lines = new Set();
+	function visit(node) {
+		if (isTypeOnlyRuntimeNode(node)) return;
+		if (isCountedStatement(node) || isCountedDeclaration(node)) lines.add(lineAtStart(node, sourceFile));
+		ts.forEachChild(node, visit);
+	}
+	for (const statement of sourceFile.statements) visit(statement);
+	return lines.size;
+}
+
+function collectTopLevelImperativeSpans(sourceFile) {
+	return sourceFile.statements
+		.filter((statement) => isTopLevelImperativeStatement(statement))
+		.map((statement) => nodeSpan(statement, sourceFile));
+}
+
+function isTopLevelImperativeStatement(statement) {
+	if (
+		ts.isIfStatement(statement) ||
+		ts.isSwitchStatement(statement) ||
+		ts.isForStatement(statement) ||
+		ts.isForInStatement(statement) ||
+		ts.isForOfStatement(statement) ||
+		ts.isWhileStatement(statement) ||
+		ts.isDoStatement(statement) ||
+		ts.isTryStatement(statement) ||
+		ts.isThrowStatement(statement)
+	) {
+		return true;
+	}
+	if (ts.isExpressionStatement(statement)) return !ts.isStringLiteral(statement.expression);
+	if (ts.isExportAssignment(statement)) return containsImperativeExpression(statement.expression);
+	if (ts.isVariableStatement(statement)) {
+		return statement.declarationList.declarations.some(
+			(declaration) => declaration.initializer && containsImperativeExpression(declaration.initializer),
+		);
+	}
+	if (ts.isClassDeclaration(statement)) return classHasImperativeInitialization(statement);
+	return false;
+}
+
+function containsImperativeExpression(node) {
+	if (isCallableWithBody(node)) return false;
+	if (ts.isClassDeclaration(node) || ts.isClassExpression(node)) return classHasImperativeInitialization(node);
+	if (
+		ts.isCallExpression(node) ||
+		ts.isNewExpression(node) ||
+		ts.isAwaitExpression(node) ||
+		ts.isTaggedTemplateExpression(node) ||
+		ts.isDeleteExpression(node) ||
+		(ts.isBinaryExpression(node) && isAssignmentOperator(node.operatorToken.kind)) ||
+		((ts.isPrefixUnaryExpression(node) || ts.isPostfixUnaryExpression(node)) &&
+			(node.operator === ts.SyntaxKind.PlusPlusToken || node.operator === ts.SyntaxKind.MinusMinusToken))
+	) {
+		return true;
+	}
+	let found = false;
+	ts.forEachChild(node, (child) => {
+		if (!found && containsImperativeExpression(child)) found = true;
+	});
+	return found;
+}
+
+function classHasImperativeInitialization(node) {
+	if (nodeDecorators(node).length > 0) return true;
+	return node.members.some((member) => {
+		if (nodeDecorators(member).length > 0 || ts.isClassStaticBlockDeclaration(member)) return true;
+		return (
+			isStaticMember(member) &&
+			ts.isPropertyDeclaration(member) &&
+			member.initializer !== undefined &&
+			containsImperativeExpression(member.initializer)
+		);
+	});
+}
+
+function scoreScope(metrics) {
+	let penalty = 0;
+	penalty += Math.max(0, metrics.cyclomaticComplexity - SOFT_LIMITS.cyclomaticComplexity) * 4;
+	penalty += Math.max(0, metrics.maxNestingDepth - SOFT_LIMITS.maxNestingDepth) * 5;
+	if (metrics.scopeKind !== "module") {
+		penalty += Math.max(0, metrics.logicalLineCount - SOFT_LIMITS.logicalLineCount) * 1.5;
+		penalty += Math.max(0, (metrics.localBindingCount ?? 0) - SOFT_LIMITS.localBindingCount);
+	}
+	if (metrics.scopeKind === "callable") {
+		penalty += Math.max(0, (metrics.parameterCount ?? 0) - SOFT_LIMITS.parameterCount) * 3;
+	}
+	return Math.max(0, Math.round(100 - penalty));
+}
+
+function scoreFile(scopes, moduleLogicalLineCount, topLevelImperativeCount) {
+	const scores = scopes.map((scope) => scope.qualityScore);
+	const worst = scores.reduce((lowest, score) => Math.min(lowest, score), 100);
+	const average = scores.reduce((total, score) => total + score, 0) / scores.length;
+	const base = 0.7 * worst + 0.3 * average;
+	const modulePenalty = Math.max(0, moduleLogicalLineCount - SOFT_LIMITS.moduleLogicalLineCount) * 0.1;
+	const imperativePenalty =
+		Math.min(topLevelImperativeCount, MAX_SCORED_TOP_LEVEL_IMPERATIVE_STATEMENTS) * TOP_LEVEL_IMPERATIVE_PENALTY;
+	return Math.max(0, Math.round(base - modulePenalty - imperativePenalty));
+}
+
+function countHardLimitViolations(scopes) {
+	let count = 0;
+	for (const scope of scopes) {
+		if (scope.cyclomaticComplexity > HARD_LIMITS.cyclomaticComplexity) count += 1;
+		if (scope.maxNestingDepth > HARD_LIMITS.maxNestingDepth) count += 1;
+		if (scope.scopeKind !== "module" && scope.logicalLineCount > HARD_LIMITS.logicalLineCount) count += 1;
+		if (scope.scopeKind === "callable" && (scope.parameterCount ?? 0) > HARD_LIMITS.parameterCount) count += 1;
+	}
+	return count;
+}
+
+export function rankFiles(metrics) {
+	return [...metrics].sort((left, right) => {
+		return (
+			left.qualityScore - right.qualityScore ||
+			right.hardLimitViolationCount - left.hardLimitViolationCount ||
+			right.highestComplexity - left.highestComplexity ||
+			right.deepestNesting - left.deepestNesting ||
+			right.moduleLogicalLineCount - left.moduleLogicalLineCount ||
+			compareText(left.path, right.path)
+		);
+	});
+}
+
+function rankScopes(scopes) {
+	return [...scopes].sort((left, right) => {
+		return (
+			left.qualityScore - right.qualityScore ||
+			right.cyclomaticComplexity - left.cyclomaticComplexity ||
+			right.maxNestingDepth - left.maxNestingDepth ||
+			right.logicalLineCount - left.logicalLineCount ||
+			compareText(left.qualifiedName, right.qualifiedName) ||
+			left.startLine - right.startLine
+		);
+	});
+}
+
+function crossesSoftLimit(scope) {
+	if (scope.cyclomaticComplexity > SOFT_LIMITS.cyclomaticComplexity) return true;
+	if (scope.maxNestingDepth > SOFT_LIMITS.maxNestingDepth) return true;
+	if (scope.scopeKind !== "module" && scope.logicalLineCount > SOFT_LIMITS.logicalLineCount) return true;
+	if (scope.scopeKind === "callable" && (scope.parameterCount ?? 0) > SOFT_LIMITS.parameterCount) return true;
+	return scope.scopeKind !== "module" && (scope.localBindingCount ?? 0) > SOFT_LIMITS.localBindingCount;
+}
+
+export function renderReport(metrics) {
+	const scopes = rankScopes(metrics.scopes);
+	const biggest = scopes[0];
+	if (!biggest) throw new Error(`No executable scopes found for ${metrics.path}`);
+	const counts = countScopeKinds(metrics.scopes);
+	const lines = [
+		`- ${markdownCodeSpan(metrics.path)}`,
+		`  - Quality heuristic: ${metrics.qualityScore}/100`,
+		`  - Module logical lines: ${metrics.moduleLogicalLineCount}`,
+		`  - Executable scopes: ${metrics.scopes.length} (${counts.module} module, ${counts.staticBlock} ${plural(counts.staticBlock, "static block")}, ${counts.callable} ${plural(counts.callable, "callable")})`,
+		`  - Hard-limit violations: ${metrics.hardLimitViolationCount}`,
+	];
+	if (metrics.topLevelImperativeSpans.length > 0) {
+		lines.push(
+			`  - Top-level imperative statements: ${metrics.topLevelImperativeSpans.length} at ${formatSpanList(metrics.topLevelImperativeSpans)}`,
+		);
+	}
+	lines.push(`  - Biggest offender: ${markdownCodeSpan(biggest.qualifiedName)} at ${formatSpan(biggest)}`);
+	lines.push(...renderExpandedScope(biggest));
+
+	const hotspots = scopes.slice(1).filter(crossesSoftLimit).slice(0, 4);
+	if (hotspots.length > 0) {
+		lines.push("  - Other hotspots:");
+		for (const scope of hotspots) lines.push(`    - ${renderCompactScope(scope)}`);
+	}
+	return `${lines.join("\n")}\n`;
+}
+
+function renderExpandedScope(scope) {
+	const lines = [
+		`    - Scope: ${scope.scopeKind}`,
+		...(scope.syntaxKind ? [`    - Kind: ${scope.syntaxKind}`, `    - Role: ${scope.role}`] : []),
+		`    - Quality heuristic: ${scope.qualityScore}/100`,
+		`    - Cyclomatic complexity: ${scope.cyclomaticComplexity}`,
+		`    - Maximum nesting depth: ${scope.maxNestingDepth}`,
+		`    - Logical lines: ${scope.logicalLineCount}`,
+	];
+	if (scope.parameterCount !== null) lines.push(`    - Parameters: ${scope.parameterCount}`);
+	if (scope.localBindingCount !== null) lines.push(`    - Local bindings: ${scope.localBindingCount}`);
+	return lines;
+}
+
+function renderCompactScope(scope) {
+	const values = [
+		`scope ${scope.scopeKind}`,
+		...(scope.syntaxKind ? [`kind ${scope.syntaxKind}`, `role ${scope.role}`] : []),
+		`quality ${scope.qualityScore}/100`,
+		`complexity ${scope.cyclomaticComplexity}`,
+		`nesting ${scope.maxNestingDepth}`,
+		`logical lines ${scope.logicalLineCount}`,
+	];
+	if (scope.parameterCount !== null) values.push(`parameters ${scope.parameterCount}`);
+	if (scope.localBindingCount !== null) values.push(`locals ${scope.localBindingCount}`);
+	return `${markdownCodeSpan(scope.qualifiedName)} at ${formatSpan(scope)}: ${values.join(", ")}`;
+}
+
+function countScopeKinds(scopes) {
+	return {
+		module: scopes.filter((scope) => scope.scopeKind === "module").length,
+		staticBlock: scopes.filter((scope) => scope.scopeKind === "static-block").length,
+		callable: scopes.filter((scope) => scope.scopeKind === "callable").length,
+	};
+}
+
+function plural(count, singular) {
+	return count === 1 ? singular : `${singular}s`;
+}
+
+function formatSpan(span) {
+	return span.startLine === span.endLine ? `L${span.startLine}` : `L${span.startLine}-L${span.endLine}`;
+}
+
+function formatSpanList(spans) {
+	const visible = spans.slice(0, MAX_REPORTED_TOP_LEVEL_IMPERATIVE_SPANS).map(formatSpan);
+	const remaining = spans.length - visible.length;
+	return remaining > 0 ? `${visible.join(", ")}, and ${remaining} more` : visible.join(", ");
+}
+
+function markdownCodeSpan(value) {
+	const safeValue = escapeControls(value);
+	const runs = safeValue.match(/`+/g) ?? [];
+	const fence = "`".repeat(Math.max(1, ...runs.map((run) => run.length + 1)));
+	const needsPadding = safeValue.startsWith("`") || safeValue.endsWith("`") || /^\s|\s$/.test(safeValue);
+	const content = needsPadding ? ` ${safeValue} ` : safeValue;
+	return `${fence}${content}${fence}`;
+}
+
+function nodeSpan(node, sourceFile) {
+	return { startLine: lineAtStart(node, sourceFile), endLine: lineAtEnd(node, sourceFile) };
+}
+
+function lineAtStart(node, sourceFile) {
+	return sourceFile.getLineAndCharacterOfPosition(node.getStart(sourceFile)).line + 1;
+}
+
+function lineAtEnd(node, sourceFile) {
+	const position = Math.max(node.getStart(sourceFile), node.end - 1);
+	return sourceFile.getLineAndCharacterOfPosition(position).line + 1;
+}
+
+function validateFileMetrics(metrics) {
+	if (!Number.isInteger(metrics.qualityScore) || metrics.qualityScore < 0 || metrics.qualityScore > 100) {
+		throw new Error(`Invalid file quality score for ${metrics.path}`);
+	}
+	if (metrics.scopes.filter((scope) => scope.scopeKind === "module").length !== 1) {
+		throw new Error(`Expected one module scope for ${metrics.path}`);
+	}
+	for (const scope of metrics.scopes) {
+		const values = [
+			scope.startLine,
+			scope.endLine,
+			scope.cyclomaticComplexity,
+			scope.maxNestingDepth,
+			scope.logicalLineCount,
+			scope.qualityScore,
+			...(scope.parameterCount === null ? [] : [scope.parameterCount]),
+			...(scope.localBindingCount === null ? [] : [scope.localBindingCount]),
+		];
+		if (values.some((value) => !Number.isInteger(value) || value < 0)) {
+			throw new Error(`Invalid scope metrics for ${metrics.path}:${scope.qualifiedName}`);
+		}
+		if (scope.startLine < 1 || scope.endLine < scope.startLine || scope.cyclomaticComplexity < 1) {
+			throw new Error(`Invalid scope span or complexity for ${metrics.path}:${scope.qualifiedName}`);
+		}
+		if (scope.qualityScore > 100) throw new Error(`Invalid scope quality for ${metrics.path}:${scope.qualifiedName}`);
+		if (scope.scopeKind === "callable" && (!scope.syntaxKind || !scope.role || scope.parameterCount === null)) {
+			throw new Error(`Incomplete callable metrics for ${metrics.path}:${scope.qualifiedName}`);
+		}
+		if (scope.scopeKind !== "callable" && (scope.syntaxKind !== null || scope.role !== null || scope.parameterCount !== null)) {
+			throw new Error(`Invalid non-callable metrics for ${metrics.path}:${scope.qualifiedName}`);
+		}
 	}
 }
 
@@ -496,7 +1323,7 @@ function displayValue(value) {
 }
 
 function escapeControls(value) {
-	return String(value).replace(/[\u0000-\u001f\u007f]/g, (character) => {
+	return String(value).replace(/[\p{Cc}\u2028\u2029]/gu, (character) => {
 		switch (character) {
 			case "\n":
 				return "\\n";

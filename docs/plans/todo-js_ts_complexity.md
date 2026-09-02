@@ -80,12 +80,15 @@ Exclude a path containing any of these directory components:
 - `.svelte-kit`
 - `.turbo`
 - `.vite`
+- `.venv`
 - `.yarn`
 - `build`
 - `coverage`
 - `dist`
 - `node_modules`
 - `out`
+- `site-packages`
+- `venv`
 
 For every accepted source suffix, exclude a file when the basename before that suffix ends with `.min` or the full filename contains `.bundle.`. Source maps are outside the accepted suffix set.
 
@@ -236,12 +239,12 @@ Module logical lines are unique starting lines of non-empty statements and decla
 The module scope measures top-level cyclomatic complexity and nesting. A top-level imperative statement is one of:
 
 - `if`, `switch`, a loop, `try`, or `throw`.
-- A standalone expression statement.
+- A standalone expression statement other than a string-literal directive.
 - An export assignment whose expression contains a call, construction, `await`, tagged template, assignment, or update expression.
 - A variable initializer containing one of those expressions.
 - A class declaration or expression with decorators, a static block, or a static field initializer containing one of those expressions.
 
-Unwrap export declarations and classify the contained declaration or expression. Imports, callable declarations, undecorated classes without imperative static initialization, and simple constant initializers are excluded. Stop expression inspection at nested callable bodies and instance member initializers. Analyze static blocks separately.
+Unwrap export declarations and classify the contained declaration or expression. Imports, string-literal directives, callable declarations, undecorated classes without imperative static initialization, and simple constant initializers are excluded. Stop expression inspection at nested callable bodies and instance member initializers. Analyze static blocks separately.
 
 ## Limits and scoring
 
@@ -268,7 +271,7 @@ Calculate scope quality from `100` with these penalties:
 
 Round to the nearest integer and clamp to `0..100`. Module scope quality uses complexity and nesting only; module size and top-level statements are file penalties.
 
-Calculate the file's base score from 70% of the worst scope score and 30% of the scope average. Subtract `0.1` for each module logical line above `250` and `2` for each top-level imperative statement, then round and clamp to `0..100`.
+Calculate the file's base score from 70% of the worst scope score and 30% of the scope average. Subtract `0.1` for each module logical line above `250`. Subtract `0.25` for each top-level imperative statement, capped at 20 statements and a 5-point penalty. The cap prevents declarative builder calls, such as schema definitions, from dominating control-flow complexity. Round and clamp to `0..100`.
 
 Count every applicable scope metric that exceeds a hard limit as one hard-limit violation.
 
@@ -330,6 +333,7 @@ Rules:
 - The biggest executable scope includes expanded metrics.
 - Other hotspots use one compact bullet each.
 - Omit top-level imperative statements and other hotspots when none exist.
+- Show at most ten top-level imperative spans, followed by the number omitted.
 - Omit kind, role, parameters, and local bindings when they do not apply to the scope kind.
 - Render every path and inferred name with a Markdown code-span fence longer than any backtick run in the value. Add code-span padding when Markdown requires it.
 - Replace newlines, carriage returns, tabs, NUL bytes, and other control characters in rendered paths and names with visible escape sequences.
@@ -509,33 +513,47 @@ QA checkpoint:
 
 ## Phase 2: Metrics, scoring, and report
 
-- [todo] Analyze the module body, class static blocks, and every callable kind with a body.
-- [todo] Infer stable names, callable syntax kinds, and callable roles without copying computed expressions.
-- [todo] Isolate nested executable-scope metrics from their enclosing scope.
-- [todo] Calculate cyclomatic complexity and control-flow nesting from one decision definition.
-- [todo] Calculate logical lines, applicable parameters, and applicable local bindings.
-- [todo] Calculate module metrics and top-level imperative statement spans after unwrapping exports.
-- [todo] Apply scope and file scoring, hard-limit counting, and deterministic ranking.
-- [todo] Render one file, one expanded executable scope, and up to four additional hotspots.
-- [todo] Encode repository-derived paths and names safely for Markdown and standard error.
-- [todo] Validate metric ranges and source spans before writing the report.
-- [todo] Calibrate thresholds and weights against the labeled JavaScript and TypeScript corpus before release.
+- [done] Analyze the module body, class static blocks, and every callable kind with a body.
+- [done] Infer stable names, callable syntax kinds, and callable roles without copying computed expressions.
+- [done] Isolate nested executable-scope metrics from their enclosing scope.
+- [done] Calculate cyclomatic complexity and control-flow nesting from one decision definition.
+- [done] Calculate logical lines, applicable parameters, and applicable local bindings.
+- [done] Calculate module metrics and top-level imperative statement spans after unwrapping exports.
+- [done] Apply scope and file scoring, hard-limit counting, and deterministic ranking.
+- [done] Render one file, one expanded executable scope, and up to four additional hotspots.
+- [done] Encode repository-derived paths and names safely for Markdown and standard error.
+- [done] Validate metric ranges and source spans before writing the report.
+- [done] Calibrate thresholds and weights against the labeled JavaScript and TypeScript corpus before release.
 
 QA checkpoint:
 
-- [todo] Assert exact metrics for conditionals, loops, switch clauses, catches, ternaries, logical operators, and logical assignments.
-- [todo] Confirm cyclomatic complexity adds each decision once.
-- [todo] Confirm optional chaining, `else`, `default`, `try`, and `finally` do not add cyclomatic decisions.
-- [todo] Confirm `else if` nesting and nested-scope isolation.
-- [todo] Cover module-level control flow, class decorators, static field initializers, and static blocks with and without callables in the same file.
-- [todo] Cover destructured parameters, the TypeScript `this` parameter, parameter properties, catch bindings, and local declarations.
-- [todo] Cover functions, arrows, object methods, class members, accessors, constructors, assigned functions, callbacks, immediate invocations, JSX, and TSX.
-- [todo] Confirm type-only declarations and bodyless signatures do not create executable scopes.
-- [todo] Verify export assignments, exported declarations, decorators, static initializers, and top-level imperative spans against fixture source.
-- [todo] Confirm imports, simple constants, and instance initializers do not create top-level imperative findings.
-- [todo] Render paths and names containing backticks, whitespace, control characters, Unicode, and computed properties without breaking the Markdown structure.
-- [todo] Confirm controlled file and scope ties produce byte-identical reports.
-- [todo] Review selected hotspots from each corpus category, record false positives, and justify the final thresholds and weights.
+- [done] Assert exact metrics for conditionals, loops, switch clauses, catches, ternaries, logical operators, and logical assignments.
+- [done] Confirm cyclomatic complexity adds each decision once.
+- [done] Confirm optional chaining, `else`, `default`, `try`, and `finally` do not add cyclomatic decisions.
+- [done] Confirm `else if` nesting and nested-scope isolation.
+- [done] Cover module-level control flow, class decorators, static field initializers, and static blocks with and without callables in the same file.
+- [done] Cover destructured parameters, the TypeScript `this` parameter, parameter properties, catch bindings, and local declarations.
+- [done] Cover functions, arrows, object methods, class members, accessors, constructors, assigned functions, callbacks, immediate invocations, JSX, and TSX.
+- [done] Confirm type-only declarations and bodyless signatures do not create executable scopes.
+- [done] Verify export assignments, exported declarations, decorators, static initializers, and top-level imperative spans against fixture source.
+- [done] Confirm imports, string-literal directives, simple constants, and instance initializers do not create top-level imperative findings.
+- [done] Render paths and names containing backticks, whitespace, control characters, Unicode, and computed properties without breaking the Markdown structure.
+- [done] Confirm controlled file and scope ties produce byte-identical reports.
+- [done] Review selected hotspots from each corpus category, record false positives, and justify the final thresholds and weights.
+
+Calibration record:
+
+| Category | Repository and scope | Files | Selected hotspot | Review |
+|---|---|---:|---|---|
+| Node service | `/Users/maurosciancalepore/projects/content/sls-api-content-mcp` | 17 | `src/tools/handlers.ts`, quality 79 | `searchOffers` concentrates conditional request construction; its reported L98-L120 span matches the source. |
+| Browser code | `/Users/maurosciancalepore/projects/sf-infra-tools` | 7 | `webapp/src/lib/models/ec2node.svelte.ts`, quality 100 | The model has no branch hotspot and remains below every soft limit. |
+| React application | `/Users/maurosciancalepore/projects/content/fadmin`, excluding `app/assets/javascript` and `public` | 37 | `app/frontend/v2/App.tsx`, quality 29 | The 392-line `App` component has complexity 44 and 42 local bindings; L124-L515 matches the component body. |
+| Utility library | Packaged `jiti` 2.7.0 copied to an isolated directory | 7 | `lib/jiti-native.mjs`, quality 72 | `createJiti.jiti.import` has nested resolution and retry branches; its complexity 11 and L45-L78 span match the source. |
+| Multi-package service repository | `/Users/maurosciancalepore/projects/content/sls-api-content` | 21 | `db-sync/src/functions/old-cluster-cleanup/handler.js`, quality 87 | The handler contains nested deletion guards over L5-L39 and is the credible local hotspot. |
+
+The first Node-service run selected a schema module because 31 declarative builder calls each incurred a two-point top-level penalty. Calibration reduced that penalty to 0.25 points, capped it at five points, and capped rendered top-level spans at ten. The control-flow, nesting, size, parameter, and local-binding limits remain unchanged.
+
+The unconfigured React repository selected tracked third-party assets. Calibration used the documented repository exclusions because `app/assets/javascript` can also contain owned source and is unsafe as a global exclusion. All calibrated reports were byte-identical across two runs.
 
 ## Phase 3: Process workflow and screen reuse
 

@@ -12,6 +12,8 @@ import {
 	EXIT_NO_FILES,
 	EXIT_RESOURCE,
 	inspectRepository,
+	rankFiles,
+	renderReport,
 	run,
 } from "../../scripts/javascript_typescript_complexity.mjs";
 
@@ -53,10 +55,29 @@ function relativePaths(result) {
 	return result.files.map((file) => file.relativePath);
 }
 
+function fileMetrics(result, relativePath) {
+	const metrics = result.metrics.find((item) => item.path === relativePath);
+	assert.ok(metrics, `Missing metrics for ${relativePath}`);
+	return metrics;
+}
+
+function scopeMetrics(metrics, qualifiedName) {
+	const scope = metrics.scopes.find((item) => item.qualifiedName === qualifiedName);
+	assert.ok(scope, `Missing scope ${qualifiedName}`);
+	return scope;
+}
+
 async function captureRun(root, options = {}) {
+	let stdout = "";
 	let stderr = "";
 	const code = await run(["--repo-root", root], {
 		...options,
+		stdout: {
+			write(chunk) {
+				stdout += String(chunk);
+				return true;
+			},
+		},
 		stderr: {
 			write(chunk) {
 				stderr += String(chunk);
@@ -64,7 +85,7 @@ async function captureRun(root, options = {}) {
 			},
 		},
 	});
-	return { code, stderr };
+	return { code, stdout, stderr };
 }
 
 async function initializeGit(root) {
@@ -106,12 +127,15 @@ test("Git discovery includes production sources and applies every built-in exclu
 		".svelte-kit",
 		".turbo",
 		".vite",
+		".venv",
 		".yarn",
 		"build",
 		"coverage",
 		"dist",
 		"node_modules",
 		"out",
+		"site-packages",
+		"venv",
 	];
 	for (const directory of generatedDirectories) {
 		await writeFixture(root, `${directory}/excluded.ts`, "not valid source");
@@ -301,4 +325,349 @@ test("analysis parses source without executing source or build configuration", a
 	const result = await inspectRepository(root);
 	assert.deepEqual(relativePaths(result), ["danger.ts"]);
 	await assert.rejects(() => access(marker), { code: "ENOENT" });
+});
+
+test("cyclomatic complexity counts each supported decision once", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"decisions.ts",
+		[
+			"function decisions(a: boolean, b: boolean, items: object) {",
+			"  if (a && b) {}",
+			"  for (let i = 0; i < 1; i++) {}",
+			"  for (const key in items) {}",
+			"  for (const item of Object.keys(items)) {}",
+			"  while (a) {}",
+			"  do {} while (b);",
+			"  switch (a) {",
+			"    case true: break;",
+			"    case false: break;",
+			"    default: break;",
+			"  }",
+			"  try {} catch {} finally {}",
+			"  const x = a ? 1 : 2;",
+			"  a ||= b;",
+			"  a &&= b;",
+			"  a ??= b;",
+			"  const either = a || b;",
+			"  const fallback = a ?? b;",
+			"  const y = items?.value;",
+			"}",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const metrics = fileMetrics(result, "decisions.ts");
+	const scope = scopeMetrics(metrics, "decisions");
+	assert.deepEqual(
+		{
+			complexity: scope.cyclomaticComplexity,
+			nesting: scope.maxNestingDepth,
+			logicalLines: scope.logicalLineCount,
+			parameters: scope.parameterCount,
+			locals: scope.localBindingCount,
+			quality: scope.qualityScore,
+		},
+		{ complexity: 17, nesting: 1, logicalLines: 18, parameters: 3, locals: 7, quality: 48 },
+	);
+	assert.equal(metrics.moduleLogicalLineCount, 19);
+	assert.equal(metrics.hardLimitViolationCount, 1);
+	assert.equal(metrics.qualityScore, 56);
+});
+
+test("control-flow nesting treats else-if bodies as siblings", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"nesting.ts",
+		[
+			"function nested(active: boolean, items: number[]) {",
+			"  if (active) {",
+			"    for (const item of items) {",
+			"      try {",
+			"        while (active) { use(item); }",
+			"      } catch {",
+			"        if (active) { use(item); }",
+			"      } finally { use(item); }",
+			"    }",
+			"  } else if (items.length) {",
+			"    use(items);",
+			"  }",
+			"}",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const scope = scopeMetrics(fileMetrics(result, "nesting.ts"), "nested");
+	assert.equal(scope.cyclomaticComplexity, 7);
+	assert.equal(scope.maxNestingDepth, 4);
+});
+
+test("callable parameters and local bindings exclude pseudo-parameters and nested scope locals", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"bindings.ts",
+		[
+			"class Example {",
+			"  constructor(this: Example, public value: number, { a }: { a: number }, ...rest: number[]) {",
+			"    const { b, c: d } = { b: 1, c: 2 };",
+			"    for (const [e, f] of [[1, 2]]) {}",
+			"    try {} catch ({ g }) {}",
+			"    function local() {}",
+			"    class Inner {}",
+			"    const callback = () => { const hidden = 1; if (hidden) {} };",
+			"  }",
+			"}",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const metrics = fileMetrics(result, "bindings.ts");
+	const constructor = scopeMetrics(metrics, "Example.constructor");
+	assert.equal(constructor.parameterCount, 3);
+	assert.equal(constructor.localBindingCount, 8);
+	assert.equal(constructor.cyclomaticComplexity, 3);
+	const callback = scopeMetrics(metrics, "Example.constructor.callback");
+	assert.equal(callback.localBindingCount, 1);
+	assert.equal(callback.cyclomaticComplexity, 2);
+});
+
+test("scope discovery separates syntax kind, role, static blocks, and qualified names", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"scopes.ts",
+		[
+			"namespace Domain {",
+			"  class Service {",
+			"    static { const callback = () => 1; }",
+			"    method() {}",
+			"    get value() { return 1; }",
+			"    set value(next: number) {}",
+			"    field = () => 1;",
+			"  }",
+			"  const assigned = function named() {};",
+			"  const object = { nested: { run() {} } };",
+			"  consume((value) => value);",
+			"  (() => 1)();",
+			"  const factory = () => () => 1;",
+			"}",
+			"export default function () {}",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const scopes = fileMetrics(result, "scopes.ts").scopes;
+	const summary = scopes.map((scope) => ({
+		name: scope.qualifiedName,
+		scope: scope.scopeKind,
+		kind: scope.syntaxKind,
+		role: scope.role,
+	}));
+	assert.deepEqual(summary, [
+		{ name: "<module>", scope: "module", kind: null, role: null },
+		{ name: "Domain.Service.<static@L3>", scope: "static-block", kind: null, role: null },
+		{ name: "Domain.Service.<static@L3>.callback", scope: "callable", kind: "arrow", role: "assigned" },
+		{ name: "Domain.Service.method", scope: "callable", kind: "method", role: "declaration" },
+		{ name: "Domain.Service.value", scope: "callable", kind: "getter", role: "declaration" },
+		{ name: "Domain.Service.value", scope: "callable", kind: "setter", role: "declaration" },
+		{ name: "Domain.Service.field", scope: "callable", kind: "arrow", role: "assigned" },
+		{ name: "Domain.assigned", scope: "callable", kind: "function", role: "assigned" },
+		{ name: "Domain.object.nested.run", scope: "callable", kind: "method", role: "declaration" },
+		{ name: "Domain.<callback@L11>", scope: "callable", kind: "arrow", role: "callback" },
+		{ name: "Domain.<anonymous@L12>", scope: "callable", kind: "arrow", role: "immediate" },
+		{ name: "Domain.factory", scope: "callable", kind: "arrow", role: "assigned" },
+		{ name: "Domain.factory.<anonymous@L13>", scope: "callable", kind: "arrow", role: "anonymous" },
+		{ name: "default", scope: "callable", kind: "function", role: "declaration" },
+	]);
+});
+
+test("TSX attribute callbacks retain their enclosing callable and assigned role", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"view.tsx",
+		[
+			"function View({ active }: { active: boolean }) {",
+			"  return <button onClick={() => { if (active) {} }}>Save</button>;",
+			"}",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const callback = scopeMetrics(fileMetrics(result, "view.tsx"), "View.onClick");
+	assert.equal(callback.syntaxKind, "arrow");
+	assert.equal(callback.role, "assigned");
+	assert.equal(callback.cyclomaticComplexity, 2);
+});
+
+test("module metrics include runtime initialization and isolate class member bodies", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"module.ts",
+		[
+			'import type { Shape } from "./types.js";',
+			'import { type Other, runtime } from "./runtime.js";',
+			"interface Contract {}",
+			"type Alias = Shape | Other;",
+			"declare function ambient(): void;",
+			"if (runtime) { use(runtime); }",
+			"@sealed",
+			"export class Example {",
+			"  static selected = runtime ? create() : fallback;",
+			"  static { if (runtime) { use(runtime); } }",
+			"  instance = create();",
+			"  method() { if (runtime) { use(runtime); } }",
+			"}",
+			"export default create();",
+			"export const client = connect();",
+			"const simple = 1;",
+			"class Plain {",
+			"  instance = create();",
+			"}",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const metrics = fileMetrics(result, "module.ts");
+	const moduleScope = scopeMetrics(metrics, "<module>");
+	const staticBlock = metrics.scopes.find((scope) => scope.scopeKind === "static-block");
+	assert.ok(staticBlock);
+	assert.equal(moduleScope.cyclomaticComplexity, 3);
+	assert.equal(moduleScope.maxNestingDepth, 1);
+	assert.equal(staticBlock.cyclomaticComplexity, 2);
+	assert.equal(scopeMetrics(metrics, "Example.method").cyclomaticComplexity, 2);
+	assert.equal(metrics.moduleLogicalLineCount, 12);
+	assert.ok(metrics.scopes.every((scope) => scope.qualifiedName !== "ambient"));
+	assert.deepEqual(metrics.topLevelImperativeSpans, [
+		{ startLine: 6, endLine: 6 },
+		{ startLine: 7, endLine: 13 },
+		{ startLine: 14, endLine: 14 },
+		{ startLine: 15, endLine: 15 },
+	]);
+});
+
+test("computed properties are not copied into inferred names", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"computed.ts",
+		[
+			"const object = {",
+			"  [doNotCopyThisExpression()]: function (a: boolean) {",
+			"    if (a) {}",
+			"  },",
+			"};",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const names = fileMetrics(result, "computed.ts").scopes.map((scope) => scope.qualifiedName);
+	assert.ok(names.includes("object.<computed@L2>"));
+	assert.ok(names.every((name) => !name.includes("doNotCopyThisExpression")));
+});
+
+test("file and scope ranking use deterministic tie breakers", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	const source = [
+		"export function hotspot(a: boolean) {",
+		"  if (a) {}",
+		"  if (a) {}",
+		"  if (a) {}",
+		"  if (a) {}",
+		"}",
+	].join("\n");
+	await writeFixture(root, "b.ts", source);
+	await writeFixture(root, "a.ts", source);
+
+	const result = await inspectRepository(root);
+	const ranked = rankFiles(result.metrics);
+	assert.deepEqual(ranked.map((metrics) => metrics.path), ["a.ts", "b.ts"]);
+	assert.equal(scopeMetrics(ranked[0], "hotspot").qualityScore, 96);
+	assert.equal(ranked[0].qualityScore, 97);
+	assert.equal(renderReport(ranked[0]), renderReport(ranked[0]));
+});
+
+test("report rendering follows the stable metric order", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"simple.ts",
+		[
+			"export function simple(value: boolean) {",
+			"  if (value) { return 1; }",
+			"  return 0;",
+			"}",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	assert.equal(
+		renderReport(fileMetrics(result, "simple.ts")),
+		[
+			"- `simple.ts`",
+			"  - Quality heuristic: 100/100",
+			"  - Module logical lines: 3",
+			"  - Executable scopes: 2 (1 module, 0 static blocks, 1 callable)",
+			"  - Hard-limit violations: 0",
+			"  - Biggest offender: `simple` at L1-L4",
+			"    - Scope: callable",
+			"    - Kind: function",
+			"    - Role: declaration",
+			"    - Quality heuristic: 100/100",
+			"    - Cyclomatic complexity: 2",
+			"    - Maximum nesting depth: 1",
+			"    - Logical lines: 2",
+			"    - Parameters: 1",
+			"    - Local bindings: 0",
+			"",
+		].join("\n"),
+	);
+});
+
+test("top-level imperative reporting is capped without dominating file quality", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"builders.ts",
+		['"use strict";', ...Array.from({ length: 12 }, (_, index) => `export const schema${index} = defineSchema();`)].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const metrics = fileMetrics(result, "builders.ts");
+	assert.equal(metrics.topLevelImperativeSpans.length, 12);
+	assert.equal(metrics.qualityScore, 97);
+	const report = renderReport(metrics);
+	assert.match(report, /at L2, L3, L4, L5, L6, L7, L8, L9, L10, L11, and 2 more/);
+	assert.doesNotMatch(report, /    - (Kind|Role|Parameters|Local bindings):/);
+});
+
+test("report rendering is deterministic and contains no raw control characters from paths or names", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	const relativePath = " odd`name\nü.ts";
+	await writeFixture(
+		root,
+		relativePath,
+		[
+			"const object = {",
+			'  "run`\\n\\t\\0name": function (a, b, c, d, e) {',
+			"    if (a && b && c) {}",
+			"    if (d || e) {}",
+			"  },",
+			"};",
+		].join("\n"),
+	);
+
+	const first = await captureRun(root);
+	const second = await captureRun(root);
+	assert.equal(first.code, 0, first.stderr);
+	assert.equal(first.stdout, second.stdout);
+	assert.equal(first.stderr, "");
+	assert.match(first.stdout, /^- ``  odd`name\\nü\.ts ``$/m);
+	assert.match(first.stdout, /object\."run`\\n\\t\\u0000name"/);
+	assert.doesNotMatch(first.stdout, /[\u0000\u0009\u000d]/);
+	assert.ok(first.stdout.endsWith("\n"));
 });
