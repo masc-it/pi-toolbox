@@ -1,5 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
+import { type Dirent, existsSync, mkdirSync, readdirSync, writeFileSync } from "node:fs";
 import { join, posix } from "node:path";
 import { listProjectCollections } from "./collections.ts";
 import { validateMemoryCommitMessage } from "./commit-message.ts";
@@ -62,32 +62,70 @@ export class MemoryRepository {
 }
 
 function validateRelativeDocumentPath(path: string): void {
-	if (path.length === 0 || posix.isAbsolute(path) || posix.normalize(path) !== path || path === ".." || path.startsWith("../")) {
-		throw new Error(`Invalid knowledge-base path: ${path}`);
-	}
-	if (posix.extname(path) !== ".md") throw new Error(`Knowledge-base changes must be Markdown documents: ${path}`);
+	assertCanonicalRelativePath(path);
+	assertMarkdownDocumentPath(path);
+	validateDocumentHierarchy(path);
+}
 
+function assertCanonicalRelativePath(path: string): void {
+	const isCanonical =
+		path.length > 0 &&
+		!posix.isAbsolute(path) &&
+		posix.normalize(path) === path &&
+		path !== ".." &&
+		!path.startsWith("../");
+	if (!isCanonical) throw new Error(`Invalid knowledge-base path: ${path}`);
+}
+
+function assertMarkdownDocumentPath(path: string): void {
+	if (posix.extname(path) !== ".md") {
+		throw new Error(`Knowledge-base changes must be Markdown documents: ${path}`);
+	}
+}
+
+function validateDocumentHierarchy(path: string): void {
 	const parts = path.split("/");
 	if (parts.length === 1) {
-		if (path !== "index.md") throw new Error(`Only index.md may be stored at the knowledge-base root: ${path}`);
+		assertRootIndexPath(path);
 		return;
 	}
 
-	const root = parts[0];
+	const root = parts[0]!;
 	const filename = parts.at(-1)!;
+	assertCollectionDocumentPath(path, root, filename);
+	if (parts.length === 2) {
+		validateCollectionRootDocument(path, root, filename);
+		return;
+	}
+	validateNestedProjectDocument(path, parts, root);
+}
+
+function assertRootIndexPath(path: string): void {
+	if (path !== "index.md") {
+		throw new Error(`Only index.md may be stored at the knowledge-base root: ${path}`);
+	}
+}
+
+function assertCollectionDocumentPath(path: string, root: string, filename: string): void {
 	const conceptName = posix.basename(filename, ".md");
 	if (!isMemoryCollectionRoot(root) || !isMemoryCollectionSegment(conceptName)) {
 		throw new Error(`Knowledge-base document uses an invalid collection path: ${path}`);
 	}
-	if (parts.length === 2) {
-		if (root === "projects" && filename !== "index.md") {
+}
+
+function validateCollectionRootDocument(path: string, root: string, filename: string): void {
+	if (root === "projects") {
+		if (filename !== "index.md") {
 			throw new Error(`Project concepts must be stored under projects/<project>: ${path}`);
-		}
-		if (root !== "projects" && !isMemoryGlobalCollection(root)) {
-			throw new Error(`Knowledge-base document uses an invalid global collection: ${path}`);
 		}
 		return;
 	}
+	if (!isMemoryGlobalCollection(root)) {
+		throw new Error(`Knowledge-base document uses an invalid global collection: ${path}`);
+	}
+}
+
+function validateNestedProjectDocument(path: string, parts: string[], root: string): void {
 	if (parts.length === 3 && root === "projects" && isMemoryCollectionSegment(parts[1])) return;
 	throw new Error(`Knowledge-base hierarchy supports only global collections and projects/<project>: ${path}`);
 }
@@ -160,15 +198,27 @@ function listWorktreeFiles(root: string): string[] {
 function visitDirectory(root: string, relativeDirectory: string, paths: string[]): void {
 	const directory = join(root, relativeDirectory);
 	for (const entry of readdirSync(directory, { withFileTypes: true })) {
-		if (relativeDirectory.length === 0 && entry.name === ".git") continue;
-		const relativePath = relativeDirectory.length === 0 ? entry.name : `${relativeDirectory}/${entry.name}`;
-		if (entry.isDirectory()) {
-			visitDirectory(root, relativePath, paths);
-			continue;
-		}
-		if (!entry.isFile()) throw new Error(`Knowledge-base entries must be regular files: ${relativePath}`);
-		paths.push(relativePath);
+		if (isRootGitEntry(relativeDirectory, entry.name)) continue;
+		const relativePath = toRelativeEntryPath(relativeDirectory, entry.name);
+		visitDirectoryEntry(root, relativePath, entry, paths);
 	}
+}
+
+function isRootGitEntry(relativeDirectory: string, entryName: string): boolean {
+	return relativeDirectory.length === 0 && entryName === ".git";
+}
+
+function toRelativeEntryPath(relativeDirectory: string, entryName: string): string {
+	return relativeDirectory.length === 0 ? entryName : `${relativeDirectory}/${entryName}`;
+}
+
+function visitDirectoryEntry(root: string, relativePath: string, entry: Dirent, paths: string[]): void {
+	if (entry.isDirectory()) {
+		visitDirectory(root, relativePath, paths);
+		return;
+	}
+	if (!entry.isFile()) throw new Error(`Knowledge-base entries must be regular files: ${relativePath}`);
+	paths.push(relativePath);
 }
 
 function runGit(cwd: string, args: string[]): string {
