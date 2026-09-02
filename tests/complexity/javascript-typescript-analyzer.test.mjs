@@ -6,6 +6,7 @@ import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
+import * as analyzerModule from "../../scripts/javascript_typescript_complexity.mjs";
 import {
 	DEFAULT_LIMITS,
 	EXIT_ANALYSIS,
@@ -93,6 +94,29 @@ async function captureRun(root, options = {}) {
 async function initializeGit(root) {
 	await execFileAsync("git", ["init", "--quiet", root]);
 }
+
+test("the analyzer module preserves its public exports", () => {
+	assert.deepEqual(Object.keys(analyzerModule).sort(), [
+		"DEFAULT_LIMITS",
+		"EXIT_ANALYSIS",
+		"EXIT_BOUNDARY",
+		"EXIT_INVARIANT",
+		"EXIT_NO_FILES",
+		"EXIT_RESOURCE",
+		"analyzeSourceFile",
+		"discoverSourceFiles",
+		"enforceRepositoryLimits",
+		"inspectRepository",
+		"isExcludedPath",
+		"parseArguments",
+		"parseSourceFiles",
+		"rankFiles",
+		"readRepositoryExclusions",
+		"renderReport",
+		"resolveRepositoryRoot",
+		"run",
+	]);
+});
 
 test("the analyzer runs when its entry path contains a symbolic-link component", async (t) => {
 	const root = await createTemporaryDirectory(t);
@@ -497,6 +521,45 @@ test("scope discovery separates syntax kind, role, static blocks, and qualified 
 		{ name: "Domain.factory.<anonymous@L13>", scope: "callable", kind: "arrow", role: "anonymous" },
 		{ name: "default", scope: "callable", kind: "function", role: "declaration" },
 	]);
+});
+
+test("scope discovery preserves runtime metadata and transparent expression contexts", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"metadata.ts",
+		[
+			"@decorate(() => 1)",
+			"class Derived extends mixin(() => class {}) {",
+			"  [key(() => 2)](@parameter(() => 3) value = () => 4) {",
+			"    return () => 5;",
+			"  }",
+			"  static field = () => 6;",
+			"}",
+			"const assigned = (((() => 7) as () => number)!);",
+			"consume(((() => 8) satisfies () => number));",
+			"new ((function named() {}) as new () => object)();",
+		].join("\n"),
+	);
+
+	const scopes = fileMetrics(await inspectRepository(root), "metadata.ts").scopes;
+	assert.deepEqual(
+		scopes.map((scope) => [scope.qualifiedName, scope.role]),
+		[
+			["<module>", null],
+			["Derived.<callback@L1>", "callback"],
+			["Derived.<callback@L2>", "callback"],
+			["Derived.<callback@L3>", "callback"],
+			["Derived.<computed@L3>", "declaration"],
+			["Derived.<computed@L3>.<callback@L3>", "callback"],
+			["Derived.<computed@L3>.<anonymous@L3>", "anonymous"],
+			["Derived.<computed@L3>.<anonymous@L4>", "anonymous"],
+			["Derived.field", "assigned"],
+			["assigned", "assigned"],
+			["<callback@L9>", "callback"],
+			["named", "immediate"],
+		],
+	);
 });
 
 test("TSX attribute callbacks retain their enclosing callable and assigned role", async (t) => {
