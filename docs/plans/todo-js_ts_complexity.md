@@ -483,29 +483,29 @@ src/workflows/complexity.ts
 
 ## Phase 1: Discovery and parser boundary
 
-- [todo] Add the standalone Node analyzer and required argument validation.
-- [todo] Add Git discovery and recursive fallback with repository-boundary checks.
-- [todo] Apply one built-in exclusion predicate to Git and fallback candidates.
-- [todo] Add supported suffixes, test exclusions, declaration exclusions, and generated-path exclusions.
-- [todo] Read and validate optional repository exclusions from `.pi-toolbox.json`.
-- [todo] Enforce file-count, per-file byte, and total-byte limits before parsing.
-- [todo] Add strict UTF-8 decoding and suffix-based TypeScript `ScriptKind` selection.
-- [todo] Report parser diagnostics through exit `4` without semantic analysis.
-- [todo] Move a pinned TypeScript version into runtime dependencies.
+- [done] Add the standalone Node analyzer and required argument validation.
+- [done] Add Git discovery and recursive fallback with repository-boundary checks.
+- [done] Apply one built-in exclusion predicate to Git and fallback candidates.
+- [done] Add supported suffixes, test exclusions, declaration exclusions, and generated-path exclusions.
+- [done] Read and validate optional repository exclusions from `.pi-toolbox.json`.
+- [done] Enforce file-count, per-file byte, and total-byte limits before parsing.
+- [done] Add strict UTF-8 decoding and suffix-based TypeScript `ScriptKind` selection.
+- [done] Report parser diagnostics through exit `4` without semantic analysis.
+- [done] Move a pinned TypeScript version into runtime dependencies.
 
 QA checkpoint:
 
-- [todo] Discover tracked and untracked source while excluding Git-ignored files.
-- [todo] Exclude tracked generated paths during Git discovery and the same paths during fallback discovery.
-- [todo] Exercise all eight accepted suffixes and all declaration-file exclusions.
-- [todo] Exercise test names, test directories, generated directories, and minified and bundled variants of every accepted suffix.
-- [todo] Apply exact-file and directory-prefix exclusions from a valid `.pi-toolbox.json`.
-- [todo] Reject oversized, malformed, non-UTF-8, and boundary-escaping repository configuration.
-- [todo] Run fallback discovery outside a Git work tree.
-- [todo] Reject a missing root, a file root, and a source symlink that resolves outside the root.
-- [todo] Exercise each repository resource limit and confirm exit `6` names the breached limit.
-- [todo] Report malformed source syntax and invalid UTF-8 with the safely escaped project-relative path.
-- [todo] Confirm no target package, build configuration, or source module is executed.
+- [done] Discover tracked and untracked source while excluding Git-ignored files.
+- [done] Exclude tracked generated paths during Git discovery and the same paths during fallback discovery.
+- [done] Exercise all eight accepted suffixes and all declaration-file exclusions.
+- [done] Exercise test names, test directories, generated directories, and minified and bundled variants of every accepted suffix.
+- [done] Apply exact-file and directory-prefix exclusions from a valid `.pi-toolbox.json`.
+- [done] Reject oversized, malformed, non-UTF-8, and boundary-escaping repository configuration.
+- [done] Run fallback discovery outside a Git work tree.
+- [done] Reject a missing root, a file root, and a source symlink that resolves outside the root.
+- [done] Exercise each repository resource limit and confirm exit `6` names the breached limit.
+- [done] Report malformed source syntax and invalid UTF-8 with the safely escaped project-relative path.
+- [done] Confirm no target package, build configuration, or source module is executed.
 
 ## Phase 2: Metrics, scoring, and report
 
