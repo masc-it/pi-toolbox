@@ -2,7 +2,7 @@
 
 Minimal, keyboard-first workflow tools for the Pi coding agent.
 
-Pi Toolbox provides a shared keyboard-driven overlay with Prompt Polish, Context Finder, and Code Complexity.
+Pi Toolbox provides a shared keyboard-driven overlay with Prompt Polish, Context Finder, Python Complexity, and JS/TS Complexity.
 
 ## Install from a checkout
 
@@ -18,6 +18,7 @@ Restart Pi after installation.
 - `Ctrl+Enter` or `/tb-polish`: open Prompt Polish directly.
 - `Ctrl+.` or `/tb-context`: open Context Finder directly.
 - `/tb-complexity`: analyze Python code complexity directly.
+- `/tb-js-complexity`: analyze JavaScript and TypeScript code complexity directly.
 - `/tb-memory [on|off|toggle]`: control Memory globally. Omitting the argument toggles it. The current state and pending, processed, and error counts appear at the bottom of the Toolbox panel.
 
 Slash commands support terminals that do not emit distinct modified key sequences.
@@ -30,11 +31,31 @@ Write a prompt in Pi's editor and open Prompt Polish. When the prompt is populat
 
 Context Finder sends an editable copy of the current Pi prompt to `openai-codex/gpt-5.6-luna` at medium thinking and starts automatically when the prompt is populated. A read-only scouting agent uses project search tools such as read, grep, find, ls, `rg`, and `git grep`, then appends its bullet list of relevant files and symbols and automatically submits the enriched prompt to Pi.
 
-## Code Complexity
+## Python Complexity
 
-Code Complexity runs the bundled `scripts/python_complexity.py` analyzer through `uv`, so `uv` must be available in `PATH`. It scans tracked and untracked production Python files, respects Git ignore rules, and falls back to a recursive walk outside Git repositories. It excludes `test` and `tests` directories; `test_*.py`, `*_test.py`, and `conftest.py`; virtual environments; Python and lint caches; dependencies; coverage output; and `build` and `dist` output.
+Python Complexity runs the bundled `scripts/python_complexity.py` analyzer through `uv`, so `uv` must be available in `PATH`. It scans tracked and untracked production Python files, respects Git ignore rules, and falls back to a recursive walk outside Git repositories. It excludes `test` and `tests` directories; `test_*.py`, `*_test.py`, and `conftest.py`; virtual environments; Python and lint caches; dependencies; coverage output; and `build` and `dist` output.
 
-The analyzer ranks files by its AST-based quality heuristic, hard-limit violations, function complexity, nesting, module logical lines, and path. It reports one file with module metrics, top-level executable statements, the biggest function offender, source spans, and up to four additional hotspots. Function metrics cover cyclomatic complexity, nesting, logical lines, parameters, local variables, branches, and bare `except` clauses. The heuristic is a ranking aid rather than a correctness measure. Toolbox submits a fixed refactoring request with the report to the main Pi session.
+The analyzer ranks files by its AST-based quality heuristic, hard-limit violations, function complexity, nesting, module logical lines, and path. It reports one file with module metrics, top-level executable statements, the biggest function offender, source spans, and up to four additional hotspots. Function metrics cover cyclomatic complexity, nesting, logical lines, parameters, local variables, branches, and bare `except` clauses. The heuristic ranks refactoring candidates; it does not measure correctness or runtime performance. Toolbox submits a fixed refactoring request with the report to the main Pi session.
+
+## JS/TS Complexity
+
+JS/TS Complexity runs the bundled `scripts/javascript_typescript_complexity.mjs` analyzer with Toolbox's Node executable and pinned TypeScript parser. It accepts `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, and `.cts` files. Parsing is syntax-only: the analyzer does not load the target project's dependencies, `tsconfig.json`, source modules, or build scripts.
+
+Discovery includes tracked and untracked production files, respects Git ignore rules, and uses the same recursive fallback as the Python analyzer. It excludes declaration files, test files and directories, generated and dependency directories, minified files, and bundles. A repository can add exact-file or directory-prefix exclusions in `.pi-toolbox.json`:
+
+```json
+{
+  "complexity": {
+    "javascriptTypeScript": {
+      "excludePaths": ["generated", "public/vendor"]
+    }
+  }
+}
+```
+
+The analyzer measures module bodies, class static blocks, and callables. Its metrics cover cyclomatic complexity, control-flow nesting, logical lines, parameters, local bindings, module size, and top-level imperative statements. It reports the highest-ranked file, its primary executable scope, and up to four additional hotspots. The heuristic ranks refactoring candidates; it does not detect runtime performance problems such as blocking I/O, sequential independent awaits, N+1 requests, quadratic work, or unbounded concurrency.
+
+The first version does not parse Vue or Svelte component files, Flow syntax, embedded templates, or syntax supplied only by a project compiler plugin. Analysis is limited to five minutes, 50,000 source files, 10 MiB per file, and 512 MiB across source files. Toolbox submits the report with a fixed request to preserve behavior and public types rather than optimize only for the score.
 
 ## Data
 

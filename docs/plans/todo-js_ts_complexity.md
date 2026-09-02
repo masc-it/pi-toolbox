@@ -1,6 +1,6 @@
 # JavaScript and TypeScript code complexity plan
 
-Status: `todo`
+Status: `done`
 
 ## Goal
 
@@ -299,7 +299,7 @@ Sort its executable scopes by:
 5. Qualified name.
 6. Starting line.
 
-Render the first scope in full. Render up to four more scopes that exceed at least one applicable soft limit.
+Render the first scope in full. Render up to four more scopes with a quality score of 90 or lower. Also render a scope above 90 when it exceeds a hard limit.
 
 ## Report contract
 
@@ -555,6 +555,8 @@ The first Node-service run selected a schema module because 31 declarative build
 
 The unconfigured React repository selected tracked third-party assets. Calibration used the documented repository exclusions because `app/assets/javascript` can also contain owned source and is unsafe as a global exclusion. All calibrated reports were byte-identical across two runs.
 
+A Toolbox dogfooding run found that short callbacks with compound guards could exceed one soft limit while retaining a quality score above 90. These scopes remain part of scoring and ranking, but secondary hotspot rendering now requires quality 90 or lower or a hard-limit violation. This removes low-signal report entries without changing file selection or raw metrics.
+
 ## Phase 3: Process workflow and screen reuse
 
 - [done] Extract shared complexity result, cancellation, file validation, and output handling.
@@ -580,25 +582,40 @@ The Python report for this repository remained byte-identical before and after t
 
 ## Phase 4: Toolbox integration and packaging
 
-- [todo] Add the `js-ts-complexity` view, landing item, and `/tb-js-complexity` command.
-- [todo] Rename the existing landing label to `Python Complexity` without changing `/tb-complexity`.
-- [todo] Connect successful analysis to prompt submission.
-- [todo] Recover a failed-submission prompt without replacing non-empty editor content.
-- [todo] Add analyzer, workflow, and screen regression tests to the package test commands.
-- [todo] Document supported sources, exclusions, metrics, parser ownership, and limitations.
-- [todo] Include the Node analyzer and TypeScript runtime dependency in the installed package.
+- [done] Add the `js-ts-complexity` view, landing item, and `/tb-js-complexity` command.
+- [done] Rename the existing landing label to `Python Complexity` without changing `/tb-complexity`.
+- [done] Connect successful analysis to prompt submission.
+- [done] Recover a failed-submission prompt without replacing non-empty editor content.
+- [done] Add analyzer, workflow, and screen regression tests to the package test commands.
+- [done] Document supported sources, exclusions, metrics, parser ownership, and limitations.
+- [done] Include the Node analyzer and TypeScript runtime dependency in the installed package.
 
 QA checkpoint:
 
-- [todo] Open both complexity workflows from the landing screen and direct commands.
-- [todo] Cancel, retry, and close the JavaScript and TypeScript screen from each valid state.
-- [todo] Confirm successful analysis closes the overlay and submits one user message.
-- [todo] Confirm existing editor content is unchanged during analysis.
-- [todo] Force submission failure with an empty editor and confirm the complete prompt is restored there.
-- [todo] Force submission failure with a non-empty editor and confirm its text is preserved while the generated prompt is copied.
-- [todo] Force clipboard recovery failure and confirm the user receives a distinct error.
-- [todo] Run `npm run typecheck`, the complexity test suite, and `git diff --check`.
-- [todo] Install Toolbox from a clean checkout and confirm both bundled analyzers are present.
-- [todo] Run the installed workflow against this repository and the repositories used for score calibration.
-- [todo] Run each production analysis twice and compare report bytes.
-- [todo] Inspect the selected source spans and raw metrics, record file count, duration, and peak memory, and confirm repository Git status is unchanged.
+- [done] Open both complexity workflows from the landing screen and direct commands.
+- [done] Cancel, retry, and close the JavaScript and TypeScript screen from each valid state.
+- [done] Confirm successful analysis closes the overlay and submits one user message.
+- [done] Confirm existing editor content is unchanged during analysis.
+- [done] Force submission failure with an empty editor and confirm the complete prompt is restored there.
+- [done] Force submission failure with a non-empty editor and confirm its text is preserved while the generated prompt is copied.
+- [done] Force clipboard recovery failure and confirm the user receives a distinct error.
+- [done] Run `npm run typecheck`, the complexity test suite, and `git diff --check`.
+- [done] Install Toolbox from a clean checkout and confirm both bundled analyzers are present.
+- [done] Run the installed workflow against this repository and the repositories used for score calibration.
+- [done] Run each production analysis twice and compare report bytes.
+- [done] Inspect the selected source spans and raw metrics, record file count, duration, and peak memory, and confirm repository Git status is unchanged.
+
+The package installation contained both analyzers and TypeScript 5.9.3. The installed Python workflow matched direct analyzer output byte-for-byte. The JavaScript and TypeScript analyzer entry point was also exercised through a symbolic-link path, matching Pi's package installation behavior on macOS.
+
+Installed-workflow measurements used `/usr/bin/time -l`. The React snapshot included the documented `app/assets/javascript` and `public` exclusions.
+
+| Corpus | Files | Seconds | Peak RSS (bytes) | Selected scope | Scope metrics |
+|---|---:|---:|---:|---|---|
+| Toolbox | 54 | 0.34 | 162,693,120 | `scripts/javascript_typescript_complexity.mjs:616-696`, `visitScopeNode` | quality 0, complexity 33, nesting 3, logical lines 59 |
+| Node service | 17 | 0.28 | 147,587,072 | `src/tools/handlers.ts:98-120`, `searchOffers` | quality 70, complexity 10, nesting 0, logical lines 3 |
+| Browser code | 7 | 0.24 | 133,758,976 | `webapp/src/lib/models/ec2node.svelte.ts:6-11`, `EC2Node.constructor` | quality 100, complexity 1, nesting 0, logical lines 4 |
+| React application | 37 | 0.34 | 149,241,856 | `app/frontend/v2/App.tsx:124-515`, `App` | quality 0, complexity 44, nesting 1, logical lines 54 |
+| Utility library | 7 | 0.25 | 126,009,344 | `lib/jiti-native.mjs:45-78`, `createJiti.jiti.import` | quality 62, complexity 11, nesting 4, logical lines 20 |
+| Multi-package service | 21 | 0.28 | 136,101,888 | `db-sync/src/functions/old-cluster-cleanup/handler.js:5-39`, `handler` | quality 84, complexity 7, nesting 2, logical lines 23 |
+
+Each JavaScript and TypeScript report was byte-identical across two installed-workflow runs. Git status output was unchanged for every analyzed working tree.

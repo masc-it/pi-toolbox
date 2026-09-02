@@ -3,6 +3,7 @@ import { execFile } from "node:child_process";
 import { access, mkdtemp, mkdir, rm, symlink, writeFile } from "node:fs/promises";
 import os from "node:os";
 import path from "node:path";
+import { fileURLToPath } from "node:url";
 import { promisify } from "node:util";
 import test from "node:test";
 import {
@@ -18,6 +19,7 @@ import {
 } from "../../scripts/javascript_typescript_complexity.mjs";
 
 const execFileAsync = promisify(execFile);
+const ANALYZER_PATH = fileURLToPath(new URL("../../scripts/javascript_typescript_complexity.mjs", import.meta.url));
 const SOURCE_SUFFIXES = [".js", ".jsx", ".ts", ".tsx", ".mjs", ".cjs", ".mts", ".cts"];
 
 async function createTemporaryDirectory(t) {
@@ -91,6 +93,19 @@ async function captureRun(root, options = {}) {
 async function initializeGit(root) {
 	await execFileAsync("git", ["init", "--quiet", root]);
 }
+
+test("the analyzer runs when its entry path contains a symbolic-link component", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	const repository = path.join(root, "repository");
+	await mkdir(repository);
+	await writeFixture(repository, "source.ts");
+	const analyzerLink = path.join(root, "linked-analyzer.mjs");
+	await symlink(ANALYZER_PATH, analyzerLink);
+
+	const result = await execFileAsync(process.execPath, [analyzerLink, "--repo-root", repository], { encoding: "utf8" });
+	assert.match(result.stdout, /`source\.ts`/);
+	assert.equal(result.stderr, "");
+});
 
 test("Git discovery includes production sources and applies every built-in exclusion", async (t) => {
 	const root = await createTemporaryDirectory(t);
@@ -626,6 +641,29 @@ test("report rendering follows the stable metric order", async (t) => {
 			"",
 		].join("\n"),
 	);
+});
+
+test("secondary hotspots omit minor soft-limit breaches but retain hard-limit violations", async (t) => {
+	const root = await createTemporaryDirectory(t);
+	await writeFixture(
+		root,
+		"hotspots.ts",
+		[
+			"export function primary(value: boolean) {",
+			...Array.from({ length: 8 }, () => "  if (value) {}"),
+			"}",
+			"export function hardParameters(a: number, b: number, c: number, d: number, e: number, f: number, g: number) {}",
+			"export const shortCallback = (value: boolean) => value && value || value && value ? 1 : 0;",
+		].join("\n"),
+	);
+
+	const result = await inspectRepository(root);
+	const metrics = fileMetrics(result, "hotspots.ts");
+	assert.equal(scopeMetrics(metrics, "hardParameters").qualityScore, 91);
+	assert.equal(scopeMetrics(metrics, "shortCallback").qualityScore, 96);
+	const report = renderReport(metrics);
+	assert.match(report, /Other hotspots:\n    - `hardParameters`/);
+	assert.doesNotMatch(report, /`shortCallback`/);
 });
 
 test("top-level imperative reporting is capped without dominating file quality", async (t) => {

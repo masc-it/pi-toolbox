@@ -21,9 +21,14 @@ const ITEMS: readonly LandingItem[] = [
 		view: "context-finder",
 	},
 	{
-		label: "Code Complexity",
+		label: "Python Complexity",
 		description: "Find the worst Python complexity offender and propose focused improvements.",
 		view: "complexity",
+	},
+	{
+		label: "JS/TS Complexity",
+		description: "Find the worst JavaScript or TypeScript complexity offender and propose focused improvements.",
+		view: "js-ts-complexity",
 	},
 ];
 

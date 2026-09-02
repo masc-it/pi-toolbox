@@ -89,5 +89,14 @@ test("the reused screen preserves completion and cancellation states", async () 
 	assert.match(output, /Repository complexity analysis was cancelled/);
 	assert.match(output, /Retry/);
 	assert.match(output, /Close/);
+
+	cancelled.handleInput("\r");
+	await flushMicrotasks();
+	assert.equal(cancelled.render(80)[0], "Running");
+	cancelled.handleInput("\x1b");
+	await flushMicrotasks();
+	assert.match(cancelled.render(80).join("\n"), /Analysis failed/);
+	cancelled.handleInput("\x1b");
+	assert.equal(cancelledHost.calls.closes, 1);
 	cancelled.dispose();
 });

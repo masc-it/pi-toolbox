@@ -1059,13 +1059,15 @@ function scoreFile(scopes, moduleLogicalLineCount, topLevelImperativeCount) {
 }
 
 function countHardLimitViolations(scopes) {
+	return scopes.reduce((count, scope) => count + countScopeHardLimitViolations(scope), 0);
+}
+
+function countScopeHardLimitViolations(scope) {
 	let count = 0;
-	for (const scope of scopes) {
-		if (scope.cyclomaticComplexity > HARD_LIMITS.cyclomaticComplexity) count += 1;
-		if (scope.maxNestingDepth > HARD_LIMITS.maxNestingDepth) count += 1;
-		if (scope.scopeKind !== "module" && scope.logicalLineCount > HARD_LIMITS.logicalLineCount) count += 1;
-		if (scope.scopeKind === "callable" && (scope.parameterCount ?? 0) > HARD_LIMITS.parameterCount) count += 1;
-	}
+	if (scope.cyclomaticComplexity > HARD_LIMITS.cyclomaticComplexity) count += 1;
+	if (scope.maxNestingDepth > HARD_LIMITS.maxNestingDepth) count += 1;
+	if (scope.scopeKind !== "module" && scope.logicalLineCount > HARD_LIMITS.logicalLineCount) count += 1;
+	if (scope.scopeKind === "callable" && (scope.parameterCount ?? 0) > HARD_LIMITS.parameterCount) count += 1;
 	return count;
 }
 
@@ -1095,12 +1097,8 @@ function rankScopes(scopes) {
 	});
 }
 
-function crossesSoftLimit(scope) {
-	if (scope.cyclomaticComplexity > SOFT_LIMITS.cyclomaticComplexity) return true;
-	if (scope.maxNestingDepth > SOFT_LIMITS.maxNestingDepth) return true;
-	if (scope.scopeKind !== "module" && scope.logicalLineCount > SOFT_LIMITS.logicalLineCount) return true;
-	if (scope.scopeKind === "callable" && (scope.parameterCount ?? 0) > SOFT_LIMITS.parameterCount) return true;
-	return scope.scopeKind !== "module" && (scope.localBindingCount ?? 0) > SOFT_LIMITS.localBindingCount;
+function isReportableHotspot(scope) {
+	return scope.qualityScore <= 90 || countScopeHardLimitViolations(scope) > 0;
 }
 
 export function renderReport(metrics) {
@@ -1123,7 +1121,7 @@ export function renderReport(metrics) {
 	lines.push(`  - Biggest offender: ${markdownCodeSpan(biggest.qualifiedName)} at ${formatSpan(biggest)}`);
 	lines.push(...renderExpandedScope(biggest));
 
-	const hotspots = scopes.slice(1).filter(crossesSoftLimit).slice(0, 4);
+	const hotspots = scopes.slice(1).filter(isReportableHotspot).slice(0, 4);
 	if (hotspots.length > 0) {
 		lines.push("  - Other hotspots:");
 		for (const scope of hotspots) lines.push(`    - ${renderCompactScope(scope)}`);
@@ -1359,7 +1357,15 @@ function compareText(left, right) {
 	return 0;
 }
 
-const mainPath = process.argv[1] ? path.resolve(process.argv[1]) : null;
-if (mainPath === fileURLToPath(import.meta.url)) {
+async function isMainModule(invokedPath) {
+	if (!invokedPath) return false;
+	try {
+		return (await realpath(path.resolve(invokedPath))) === (await realpath(fileURLToPath(import.meta.url)));
+	} catch {
+		return false;
+	}
+}
+
+if (await isMainModule(process.argv[1])) {
 	process.exitCode = await run(process.argv.slice(2));
 }
