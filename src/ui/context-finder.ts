@@ -11,6 +11,8 @@ import type { ToolboxScreen, ToolboxScreenHost } from "./screen.ts";
 type ContextFinderMode = "ready" | "searching";
 type FocusTarget = "prompt" | "actions";
 
+const ACTION_COUNT = 2;
+
 interface ContextFinderScreenOptions {
 	host: ToolboxScreenHost;
 	tui: TUI;
@@ -54,90 +56,24 @@ export class ContextFinderScreen implements ToolboxScreen {
 	}
 
 	render(width: number): string[] {
-		this.promptEditor.borderColor = (text) =>
-			this.options.theme.fg(this.focusTarget === "prompt" ? "accent" : "borderMuted", text);
-
-		const lines = [
-			`${this.options.theme.fg("muted", "Model:")} ${this.options.theme.fg("text", CONTEXT_FINDER_MODEL)}  ${this.options.theme.fg("muted", "Thinking:")} ${this.options.theme.fg("text", CONTEXT_FINDER_THINKING_LEVEL)}`,
-			"",
-			this.options.theme.fg(
-				this.focusTarget === "prompt" ? "accent" : "muted",
-				this.options.theme.bold(`${this.focusTarget === "prompt" ? "▸ " : "  "}Prompt`),
-			),
-			...this.promptEditor.render(width),
-		];
-
-		if (this.mode === "searching") {
-			const activity = this.progress.lastTool
-				? ` ${this.progress.toolCalls} tool call${this.progress.toolCalls === 1 ? "" : "s"}; last: ${this.progress.lastTool}`
-				: " inspecting the project";
-			lines.push("", this.options.theme.fg("accent", `Finding context…${activity}`));
-		}
-		if (this.errorMessage) {
-			lines.push("", this.options.theme.fg("error", this.errorMessage));
-		}
-
-		lines.push("", this.renderActions());
-		lines.push(
-			this.options.theme.fg(
-				"dim",
-				this.mode === "searching"
-					? "Esc cancel search"
-					: "Tab switch focus  Ctrl+. find references  Esc back",
-			),
-		);
+		this.updateEditorBorder();
+		const lines = this.renderPromptSection(width);
+		lines.push(...this.renderStatusLines());
+		lines.push("", this.renderActions(), this.renderHelp());
 		return lines;
 	}
 
 	handleInput(data: string): void {
 		if (this.mode === "searching") {
-			if (matchesKey(data, Key.escape)) {
-				this.cancelSearch();
-			}
+			this.handleSearchingInput(data);
 			return;
 		}
-		if (matchesKey(data, Key.ctrl("."))) {
-			this.startSearch();
-			return;
-		}
-		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
-			this.focusTarget = this.focusTarget === "prompt" ? "actions" : "prompt";
-			this.updateEditorFocus();
-			this.options.host.requestRender();
-			return;
-		}
-		if (matchesKey(data, Key.escape)) {
-			this.options.host.back();
-			return;
-		}
-
+		if (this.handleReadyShortcut(data)) return;
 		if (this.focusTarget === "prompt") {
-			if (matchesKey(data, Key.enter)) {
-				this.promptEditor.handleInput("\n");
-			} else {
-				this.promptEditor.handleInput(data);
-			}
-			this.options.host.requestRender();
+			this.handlePromptInput(data);
 			return;
 		}
-
-		if (matchesKey(data, Key.left) || matchesKey(data, Key.up)) {
-			this.actionIndex = (this.actionIndex + 1) % 2;
-			this.options.host.requestRender();
-			return;
-		}
-		if (matchesKey(data, Key.right) || matchesKey(data, Key.down)) {
-			this.actionIndex = (this.actionIndex + 1) % 2;
-			this.options.host.requestRender();
-			return;
-		}
-		if (matchesKey(data, Key.enter)) {
-			if (this.actionIndex === 0) {
-				this.startSearch();
-			} else {
-				this.options.host.close();
-			}
-		}
+		this.handleActionInput(data);
 	}
 
 	invalidate(): void {
@@ -150,6 +86,46 @@ export class ContextFinderScreen implements ToolboxScreen {
 		this.request = null;
 	}
 
+	private updateEditorBorder(): void {
+		this.promptEditor.borderColor = (text) =>
+			this.options.theme.fg(this.focusTarget === "prompt" ? "accent" : "borderMuted", text);
+	}
+
+	private renderPromptSection(width: number): string[] {
+		return [
+			`${this.options.theme.fg("muted", "Model:")} ${this.options.theme.fg("text", CONTEXT_FINDER_MODEL)}  ${this.options.theme.fg("muted", "Thinking:")} ${this.options.theme.fg("text", CONTEXT_FINDER_THINKING_LEVEL)}`,
+			"",
+			this.options.theme.fg(
+				this.focusTarget === "prompt" ? "accent" : "muted",
+				this.options.theme.bold(`${this.focusTarget === "prompt" ? "▸ " : "  "}Prompt`),
+			),
+			...this.promptEditor.render(width),
+		];
+	}
+
+	private renderStatusLines(): string[] {
+		const lines: string[] = [];
+		if (this.mode === "searching") {
+			lines.push("", this.options.theme.fg("accent", this.renderSearchProgress()));
+		}
+		if (this.errorMessage) {
+			lines.push("", this.options.theme.fg("error", this.errorMessage));
+		}
+		return lines;
+	}
+
+	private renderSearchProgress(): string {
+		if (!this.progress.lastTool) return "Finding context… inspecting the project";
+		const suffix = this.progress.toolCalls === 1 ? "" : "s";
+		return `Finding context… ${this.progress.toolCalls} tool call${suffix}; last: ${this.progress.lastTool}`;
+	}
+
+	private renderHelp(): string {
+		const help =
+			this.mode === "searching" ? "Esc cancel search" : "Tab switch focus  Ctrl+. find references  Esc back";
+		return this.options.theme.fg("dim", help);
+	}
+
 	private renderActions(): string {
 		const labels = [this.mode === "searching" ? "Finding…" : "Find Context", "Cancel"];
 		return labels
@@ -159,6 +135,56 @@ export class ContextFinderScreen implements ToolboxScreen {
 					: this.options.theme.fg("muted", `  ${label}  `),
 			)
 			.join(" ");
+	}
+
+	private handleSearchingInput(data: string): void {
+		if (matchesKey(data, Key.escape)) this.cancelSearch();
+	}
+
+	private handleReadyShortcut(data: string): boolean {
+		if (matchesKey(data, Key.ctrl("."))) {
+			this.startSearch();
+			return true;
+		}
+		if (matchesKey(data, Key.tab) || matchesKey(data, Key.shift("tab"))) {
+			this.toggleFocus();
+			return true;
+		}
+		if (!matchesKey(data, Key.escape)) return false;
+		this.options.host.back();
+		return true;
+	}
+
+	private toggleFocus(): void {
+		this.focusTarget = this.focusTarget === "prompt" ? "actions" : "prompt";
+		this.updateEditorFocus();
+		this.options.host.requestRender();
+	}
+
+	private handlePromptInput(data: string): void {
+		this.promptEditor.handleInput(matchesKey(data, Key.enter) ? "\n" : data);
+		this.options.host.requestRender();
+	}
+
+	private handleActionInput(data: string): void {
+		if (isActionNavigationInput(data)) {
+			this.toggleAction();
+			return;
+		}
+		if (matchesKey(data, Key.enter)) this.runSelectedAction();
+	}
+
+	private toggleAction(): void {
+		this.actionIndex = (this.actionIndex + 1) % ACTION_COUNT;
+		this.options.host.requestRender();
+	}
+
+	private runSelectedAction(): void {
+		if (this.actionIndex === 0) {
+			this.startSearch();
+			return;
+		}
+		this.options.host.close();
 	}
 
 	private startSearch(): void {
@@ -218,6 +244,15 @@ export class ContextFinderScreen implements ToolboxScreen {
 	private updateEditorFocus(): void {
 		this.promptEditor.focused = this.hostFocused && this.mode === "ready" && this.focusTarget === "prompt";
 	}
+}
+
+function isActionNavigationInput(data: string): boolean {
+	return (
+		matchesKey(data, Key.left) ||
+		matchesKey(data, Key.right) ||
+		matchesKey(data, Key.up) ||
+		matchesKey(data, Key.down)
+	);
 }
 
 function createEditorTheme(theme: Theme): EditorTheme {
