@@ -17,6 +17,7 @@ export type MemoryFactSupport = (typeof MEMORY_FACT_SUPPORT)[number];
 
 export const MEMORY_BATCH_MAX_FACTS = 10;
 export const MEMORY_BATCH_MAX_BYTES = 32 * 1024;
+export const MEMORY_CLIENT_VERSION = "pi-toolbox/0.1.0";
 
 export interface MemoryRoutingContext {
 	currentProjectCollection: MemoryCollectionPath;
@@ -32,6 +33,7 @@ export interface MemoryConfig {
 export interface MemoryServicePaths {
 	socketPath: string;
 	startupLockPath: string;
+	legacyWorkerLockPath: string;
 	logPath: string;
 }
 
@@ -39,8 +41,13 @@ export function createMemoryServicePaths(dataDirectory: string): MemoryServicePa
 	return {
 		socketPath: join(dataDirectory, "memory.sock"),
 		startupLockPath: join(dataDirectory, "memory.start.lock"),
+		legacyWorkerLockPath: createLegacyMemoryWorkerLockPath(join(dataDirectory, "memory.sqlite")),
 		logPath: join(dataDirectory, "memory-service.log"),
 	};
+}
+
+export function createLegacyMemoryWorkerLockPath(databasePath: string): string {
+	return `${databasePath}.lock`;
 }
 
 export function createMemoryConfig(

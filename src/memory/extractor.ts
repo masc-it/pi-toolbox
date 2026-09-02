@@ -1,5 +1,4 @@
 import type { WorkflowModelProfile } from "../domain.ts";
-import type { WorkflowModelClient } from "../model/client.ts";
 import {
 	isMemoryCollectionPath,
 	isMemoryFactSupport,
@@ -62,27 +61,6 @@ export interface MemoryExtractionExchange {
 	messages: Array<Pick<MemoryExchangeMessage, "sentBy" | "content">>;
 }
 
-type ExtractorModelClient = Pick<WorkflowModelClient, "completeText">;
-
-export class MemoryExtractor {
-	constructor(private readonly modelClient: ExtractorModelClient) {}
-
-	async extract(
-		exchange: MemoryExtractionExchange,
-		routing: MemoryRoutingContext,
-		signal: AbortSignal,
-	): Promise<ExtractedMemoryFact[]> {
-		validateRoutingContext(routing);
-		const output = await this.modelClient.completeText({
-			profile: MEMORY_EXTRACTOR_PROFILE,
-			systemPrompt: buildExtractorSystemPrompt(routing),
-			prompt: buildExtractorExchangePrompt(exchange),
-			signal,
-		});
-		return parseExtractorOutput(output, new Set(routing.availableCollections));
-	}
-}
-
 export function toExtractionExchange(exchange: ExtractableMemoryExchange): MemoryExtractionExchange {
 	return {
 		cwd: exchange.cwd,
@@ -130,20 +108,6 @@ export function parseExtractorOutput(
 		}
 		return { supportedBy: item.supportedBy, collectionPath: item.collectionPath, fact: item.fact.trim() };
 	});
-}
-
-function validateRoutingContext(routing: MemoryRoutingContext): void {
-	if (!isMemoryCollectionPath(routing.currentProjectCollection)) {
-		throw new Error("Memory routing returned an invalid current project collection");
-	}
-	if (
-		routing.availableCollections.length === 0 ||
-		new Set(routing.availableCollections).size !== routing.availableCollections.length ||
-		routing.availableCollections.some((collection) => !isMemoryCollectionPath(collection)) ||
-		!routing.availableCollections.includes(routing.currentProjectCollection)
-	) {
-		throw new Error("Memory routing returned invalid available collections");
-	}
 }
 
 function hasOnlyKeys(value: Record<string, unknown>, expected: readonly string[]): boolean {

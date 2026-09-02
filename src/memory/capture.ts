@@ -1,129 +1,125 @@
-import type { AgentEndEvent, ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
-import { WorkflowModelClient } from "../model/client.ts";
-import { getPiInvocation } from "../pi/invocation.ts";
-import { createMemoryConfig, type MemoryRoutingContext } from "./config.ts";
-import { MemoryExtractor, toExtractionExchange } from "./extractor.ts";
-import type { ExtractableMemoryExchange, ExtractedMemoryFact, NewMemoryExchange } from "./queue.ts";
-import type { MemoryExtractionWork } from "./worker-protocol.ts";
-import { MemorySettingsClient } from "./settings-client.ts";
+import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { MemorySessionClient } from "./client/capture.ts";
+import { MemoryServerConnection } from "./client/connection.ts";
+import { createMemoryConfig, MEMORY_CLIENT_VERSION } from "./config.ts";
 import type { MemoryStatus } from "./settings-protocol.ts";
-import { MemoryWorkerClient } from "./worker-client.ts";
 
-interface CapturedUserMessage extends NewMemoryExchange {
-	content: string;
+export interface MemorySessionIdentity {
+	sessionId: string;
+	cwd: string;
 }
 
-interface MemoryFactExtractor {
-	extract(
-		exchange: ReturnType<typeof toExtractionExchange>,
-		routing: MemoryRoutingContext,
-		signal: AbortSignal,
-	): Promise<ExtractedMemoryFact[]>;
-}
-
-interface MemoryExchangeStore {
-	captureUser(exchange: NewMemoryExchange, content: string): Promise<void>;
+interface MemoryClient {
+	captureUser(content: string, createdAt: string): Promise<void>;
 	captureAgent(content: string, createdAt: string): Promise<void>;
-	settleActiveExchange(settledAt: string): Promise<boolean>;
-	nextExtraction(): Promise<MemoryExtractionWork | null>;
-	completeExtraction(
-		exchange: ExtractableMemoryExchange,
-		facts: readonly ExtractedMemoryFact[],
-		extractedAt: string,
-	): Promise<bigint[]>;
-	logError(entry: Record<string, unknown>): Promise<void>;
-	close(): Promise<void>;
+	settleExchange(settledAt: string): Promise<boolean>;
+	getStatus(): Promise<MemoryStatus>;
+	changeEnabled(action: "on" | "off" | "toggle"): Promise<MemoryStatus>;
+	close(settledAt: string): Promise<void>;
+	disconnect(): void;
 }
 
-export class MemoryCaptureRuntime {
-	private readonly abortController = new AbortController();
-	private flight: Promise<void> | null = null;
-	private wakeRequested = false;
-	private accepting = true;
-	private failed = false;
+type MemoryClientConnector = (identity: MemorySessionIdentity) => Promise<MemoryClient>;
 
-	constructor(
-		private readonly extractor: MemoryFactExtractor,
-		private readonly store: MemoryExchangeStore,
-	) {}
+export class MemoryClientRuntime {
+	private identity: MemorySessionIdentity | null = null;
+	private client: MemoryClient | null = null;
+	private connectionFlight: Promise<MemoryClient> | null = null;
 
-	async captureUserMessage(message: CapturedUserMessage): Promise<void> {
-		if (!this.accepting) return;
-		try {
-			await this.store.captureUser(message, message.content);
-		} catch (error) {
-			await logCaptureFailure(this.store, "capture-user", error, message);
+	constructor(private readonly connect: MemoryClientConnector) {}
+
+	async start(identity: MemorySessionIdentity): Promise<void> {
+		if (this.identity) {
+			if (this.identity.sessionId === identity.sessionId && this.identity.cwd === identity.cwd) {
+				await this.requireClient();
+				return;
+			}
+			await this.close();
 		}
+		this.identity = identity;
+		await this.requireClient();
 	}
 
-	async captureAgentResponse(content: string, createdAt: string): Promise<void> {
-		if (!this.accepting) return;
-		try {
-			await this.store.captureAgent(content, createdAt);
-		} catch (error) {
-			await logCaptureFailure(this.store, "capture-agent", error);
-		}
+	async captureUser(content: string, createdAt: string): Promise<void> {
+		await this.capture((client) => client.captureUser(content, createdAt));
 	}
 
-	async settleActiveExchange(settledAt: string): Promise<void> {
-		try {
-			if (await this.store.settleActiveExchange(settledAt)) this.wake();
-		} catch (error) {
-			await logCaptureFailure(this.store, "settle-exchange", error);
-		}
+	async captureAgent(content: string, createdAt: string): Promise<void> {
+		await this.capture((client) => client.captureAgent(content, createdAt));
 	}
 
-	wake(): void {
-		if (!this.accepting || this.failed) return;
-		this.wakeRequested = true;
-		if (this.flight) return;
+	async settleExchange(settledAt: string): Promise<void> {
+		await this.capture((client) => client.settleExchange(settledAt));
+	}
 
-		const flight = this.run();
-		this.flight = flight;
-		void flight.finally(() => {
-			if (this.flight !== flight) return;
-			this.flight = null;
-			if (this.wakeRequested && this.accepting && !this.failed) this.wake();
-		});
+	async getStatus(): Promise<MemoryStatus> {
+		return this.control((client) => client.getStatus());
+	}
+
+	async changeEnabled(action: "on" | "off" | "toggle"): Promise<MemoryStatus> {
+		return this.control((client) => client.changeEnabled(action));
 	}
 
 	async close(): Promise<void> {
-		if (!this.accepting) return;
-		await this.settleActiveExchange(new Date().toISOString());
-		this.accepting = false;
-		this.abortController.abort();
-		await this.flight;
-		await this.store.close();
-	}
-
-	private async run(): Promise<void> {
+		this.identity = null;
+		const connectionFlight = this.connectionFlight;
+		this.connectionFlight = null;
+		if (connectionFlight) {
+			try {
+				(await connectionFlight).disconnect();
+			} catch {
+				// A failed connection has no resource to close.
+			}
+		}
+		const client = this.client;
+		this.client = null;
+		if (!client) return;
 		try {
-			do {
-				this.wakeRequested = false;
-				await this.drainUnextractedExchanges();
-			} while (this.wakeRequested && this.accepting);
-		} catch (error) {
-			if (!this.accepting && isAbortError(error)) return;
-			this.failed = true;
-			await recordMemoryFailure(this.store, {
-				component: "memory",
-				stage: "extract-exchange",
-				error: error instanceof Error ? error.message : String(error),
-			});
+			await client.close(new Date().toISOString());
+		} catch {
+			client.disconnect();
 		}
 	}
 
-	private async drainUnextractedExchanges(): Promise<void> {
-		while (this.accepting) {
-			const work = await this.store.nextExtraction();
-			if (!work || !this.accepting) return;
-			const facts = await this.extractor.extract(
-				toExtractionExchange(work.exchange),
-				work.routing,
-				this.abortController.signal,
-			);
-			await this.store.completeExtraction(work.exchange, facts, new Date().toISOString());
+	private async capture(operation: (client: MemoryClient) => Promise<unknown>): Promise<void> {
+		try {
+			await operation(await this.requireClient());
+		} catch {
+			this.disconnect();
 		}
+	}
+
+	private async control<T>(operation: (client: MemoryClient) => Promise<T>): Promise<T> {
+		try {
+			return await operation(await this.requireClient());
+		} catch (error) {
+			this.disconnect();
+			throw error;
+		}
+	}
+
+	private async requireClient(): Promise<MemoryClient> {
+		if (this.client) return this.client;
+		const identity = this.identity;
+		if (!identity) throw new Error("Memory session is not started");
+		const connectionFlight = this.connectionFlight ?? this.connect(identity);
+		this.connectionFlight = connectionFlight;
+		try {
+			const client = await connectionFlight;
+			if (this.identity !== identity) {
+				client.disconnect();
+				throw new Error("Memory session changed while connecting");
+			}
+			this.client = client;
+			return client;
+		} finally {
+			if (this.connectionFlight === connectionFlight) this.connectionFlight = null;
+		}
+	}
+
+	private disconnect(): void {
+		this.client?.disconnect();
+		this.client = null;
 	}
 }
 
@@ -133,76 +129,46 @@ export interface MemoryControl {
 
 export function registerMemory(pi: ExtensionAPI): MemoryControl {
 	const config = createMemoryConfig();
-	const settings = new MemorySettingsClient(config.databasePath);
-	let runtime: MemoryCaptureRuntime | undefined;
-	let transition = Promise.resolve();
-
-	const runTransition = <T>(operation: () => Promise<T>): Promise<T> => {
-		const result = transition.then(operation, operation);
-		transition = result.then(() => undefined, () => undefined);
-		return result;
-	};
-
-	const startRuntime = async (ctx: ExtensionContext): Promise<void> => {
-		if (runtime) return;
-		const worker = new MemoryWorkerClient({
-			...config,
-			piSessionId: ctx.sessionManager.getSessionId(),
-			cwd: ctx.cwd,
-			piInvocation: getPiInvocation([]),
+	const runtime = new MemoryClientRuntime(async (identity) => {
+		const connection = await MemoryServerConnection.connect(config, {
+			clientVersion: MEMORY_CLIENT_VERSION,
+			sessionId: identity.sessionId,
+			cwd: identity.cwd,
 		});
 		try {
-			runtime = new MemoryCaptureRuntime(
-				new MemoryExtractor(new WorkflowModelClient(ctx.modelRegistry)),
-				worker,
-			);
-			runtime.wake();
+			await connection.request("connectSession", {});
+			return new MemorySessionClient(connection);
 		} catch (error) {
-			await worker.close();
+			connection.close();
 			throw error;
-		}
-	};
-
-	const stopRuntime = async (): Promise<void> => {
-		const activeRuntime = runtime;
-		runtime = undefined;
-		await activeRuntime?.close();
-	};
-
-	pi.on("session_start", async (_event, ctx) => {
-		try {
-			await runTransition(async () => {
-				if (await settings.isEnabled()) await startRuntime(ctx);
-			});
-		} catch {
-			await stopRuntime();
 		}
 	});
 
-	pi.on("message_end", async (event, ctx) => {
+	pi.on("session_start", async (_event, ctx) => {
+		try {
+			await runtime.start({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd });
+		} catch {
+			// Memory startup must not interrupt the Pi session.
+		}
+	});
+
+	pi.on("message_end", async (event) => {
 		const content = getConversationMessageText(event.message);
 		if (content.length === 0) return;
 		const createdAt = new Date(event.message.timestamp).toISOString();
 		if (event.message.role === "user") {
-			await runtime?.captureUserMessage({
-				piSessionId: ctx.sessionManager.getSessionId(),
-				cwd: ctx.cwd,
-				content,
-				startedAt: createdAt,
-			});
-			return;
-		}
-		if (event.message.role === "assistant" && event.message.stopReason === "stop") {
-			await runtime?.captureAgentResponse(content, createdAt);
+			await runtime.captureUser(content, createdAt);
+		} else if (event.message.role === "assistant" && event.message.stopReason === "stop") {
+			await runtime.captureAgent(content, createdAt);
 		}
 	});
 
 	pi.on("agent_settled", async () => {
-		await runtime?.settleActiveExchange(new Date().toISOString());
+		await runtime.settleExchange(new Date().toISOString());
 	});
 
 	pi.on("session_shutdown", async () => {
-		await runTransition(stopRuntime);
+		await runtime.close();
 	});
 
 	pi.registerCommand("tb-memory", {
@@ -210,27 +176,15 @@ export function registerMemory(pi: ExtensionAPI): MemoryControl {
 		handler: async (args, ctx) => {
 			try {
 				const action = parseMemoryCommandAction(args);
-				const enabled = await runTransition(async () => {
-					const nextEnabled = action === "toggle"
-						? await settings.toggleEnabled()
-						: await settings.setEnabled(action === "on");
-					if (nextEnabled) {
-						await startRuntime(ctx);
-					} else {
-						await stopRuntime();
-					}
-					return nextEnabled;
-				});
-				ctx.ui.notify(`Memory is ${enabled ? "on" : "off"}`, "info");
+				const status = await runtime.changeEnabled(action);
+				ctx.ui.notify(`Memory is ${status.enabled ? "on" : "off"}`, "info");
 			} catch (error) {
 				ctx.ui.notify(error instanceof Error ? error.message : String(error), "error");
 			}
 		},
 	});
 
-	return {
-		getStatus: () => runTransition(() => settings.getStatus()),
-	};
+	return { getStatus: () => runtime.getStatus() };
 }
 
 export function getConversationMessageText(message: AgentEndEvent["messages"][number]): string {
@@ -242,39 +196,10 @@ export function getConversationMessageText(message: AgentEndEvent["messages"][nu
 		.join("\n\n");
 }
 
-async function logCaptureFailure(
-	store: Pick<MemoryExchangeStore, "logError">,
-	stage: "capture-user" | "capture-agent" | "settle-exchange",
-	error: unknown,
-	exchange?: Pick<NewMemoryExchange, "piSessionId" | "cwd">,
-): Promise<void> {
-	await recordMemoryFailure(store, {
-		component: "memory",
-		stage,
-		...(exchange ? { pi_session_id: exchange.piSessionId, cwd: exchange.cwd } : {}),
-		error: error instanceof Error ? error.message : String(error),
-	});
-}
-
-async function recordMemoryFailure(
-	store: Pick<MemoryExchangeStore, "logError">,
-	entry: Record<string, unknown>,
-): Promise<void> {
-	try {
-		await store.logError(entry);
-	} catch {
-		// Memory logging must not interrupt the main Pi session.
-	}
-}
-
 type MemoryCommandAction = "on" | "off" | "toggle";
 
 function parseMemoryCommandAction(args: string): MemoryCommandAction {
 	const action = args.trim().toLowerCase() || "toggle";
 	if (action === "on" || action === "off" || action === "toggle") return action;
 	throw new Error("Usage: /tb-memory [on|off|toggle]");
-}
-
-function isAbortError(error: unknown): boolean {
-	return error instanceof DOMException && error.name === "AbortError";
 }

@@ -1,4 +1,4 @@
-import { chmodSync, mkdirSync, statSync } from "node:fs";
+import { chmodSync, constants, copyFileSync, mkdirSync, statSync } from "node:fs";
 import { dirname } from "node:path";
 import Database from "better-sqlite3";
 import {
@@ -11,9 +11,14 @@ import {
 	type MemorySender,
 } from "./config.ts";
 import { canonicalizeWorkingDirectory } from "./paths.ts";
-import { MemoryRequestReceipts, type MemoryRequestIdentity } from "./request-receipts.ts";
+import {
+	MemoryRequestReceipts,
+	REQUEST_RECEIPT_SCHEMA,
+	type MemoryRequestIdentity,
+} from "./request-receipts.ts";
 
-const SCHEMA_VERSION = 3;
+export const MEMORY_SCHEMA_VERSION = 4;
+const PRE_CLIENT_SERVER_SCHEMA_VERSION = 3;
 
 const SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_exchanges (
@@ -29,6 +34,10 @@ CREATE TABLE IF NOT EXISTS memory_exchanges (
 CREATE INDEX IF NOT EXISTS memory_exchanges_pending_extraction_idx
 ON memory_exchanges (id)
 WHERE settled_at IS NOT NULL AND extracted_at IS NULL;
+
+CREATE UNIQUE INDEX IF NOT EXISTS memory_exchanges_open_session_idx
+ON memory_exchanges (pi_session_id)
+WHERE settled_at IS NULL;
 
 CREATE TABLE IF NOT EXISTS memory_messages (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -78,12 +87,6 @@ CREATE INDEX IF NOT EXISTS memory_queue_exchange_idx
 ON memory_queue (exchange_id, id);
 `;
 
-const RESET_OPERATIONAL_SCHEMA = `
-DROP TABLE IF EXISTS memory_queue;
-DROP TABLE IF EXISTS memory_messages;
-DROP TABLE IF EXISTS memory_exchanges;
-DROP TABLE IF EXISTS logs;
-`;
 
 export interface NewMemoryExchange {
 	piSessionId: string;
@@ -189,7 +192,7 @@ export class MemoryQueue {
 		this.database.pragma("foreign_keys = ON");
 		this.database.pragma("journal_mode = WAL");
 		this.database.pragma("busy_timeout = 5000");
-		initializeSchema(this.database);
+		initializeSchema(this.database, path, databaseExisted);
 		if (!databaseExisted) {
 			chmodSync(path, 0o600);
 		}
@@ -522,20 +525,72 @@ export class MemoryQueue {
 	}
 }
 
-function initializeSchema(database: Database.Database): void {
+function initializeSchema(database: Database.Database, path: string, databaseExisted: boolean): void {
 	const value = database.pragma("user_version", { simple: true }) as number | bigint;
 	const version = Number(value);
-	if (version === SCHEMA_VERSION) {
+	if (version === MEMORY_SCHEMA_VERSION) {
 		database.exec(SCHEMA);
+		database.exec(REQUEST_RECEIPT_SCHEMA);
 		return;
 	}
+	if (version === 0 && !hasOperationalTables(database)) {
+		const initialize = database.transaction(() => {
+			database.exec(SCHEMA);
+			database.exec(REQUEST_RECEIPT_SCHEMA);
+			database.pragma(`user_version = ${MEMORY_SCHEMA_VERSION}`);
+		});
+		initialize();
+		return;
+	}
+	if (version !== PRE_CLIENT_SERVER_SCHEMA_VERSION || !databaseExisted) {
+		throw new Error(`Unsupported Memory database schema version: ${version}`);
+	}
 
-	const reset = database.transaction(() => {
-		database.exec(RESET_OPERATIONAL_SCHEMA);
+	createMigrationBackup(database, path);
+	const migrate = database.transaction(() => {
+		database.prepare(`
+			UPDATE memory_exchanges
+			SET settled_at = ?
+			WHERE settled_at IS NULL
+		`).run(new Date().toISOString());
 		database.exec(SCHEMA);
-		database.pragma(`user_version = ${SCHEMA_VERSION}`);
+		database.exec(REQUEST_RECEIPT_SCHEMA);
+		database.pragma(`user_version = ${MEMORY_SCHEMA_VERSION}`);
 	});
-	reset();
+	migrate();
+}
+
+export function memoryDatabaseBackupPath(databasePath: string): string {
+	return `${databasePath}.pre-client-server.bak`;
+}
+
+function createMigrationBackup(database: Database.Database, path: string): void {
+	const backupPath = memoryDatabaseBackupPath(path);
+	if (databaseFileExists(backupPath)) {
+		const backup = new Database(backupPath, { readonly: true });
+		try {
+			const version = Number(backup.pragma("user_version", { simple: true }));
+			if (version !== PRE_CLIENT_SERVER_SCHEMA_VERSION) {
+				throw new Error(`Memory migration backup has an unexpected schema version: ${version}`);
+			}
+		} finally {
+			backup.close();
+		}
+		return;
+	}
+	database.pragma("wal_checkpoint(TRUNCATE)");
+	copyFileSync(path, backupPath, constants.COPYFILE_EXCL);
+	chmodSync(backupPath, 0o600);
+}
+
+function hasOperationalTables(database: Database.Database): boolean {
+	const row = database.prepare(`
+		SELECT COUNT(*) AS count
+		FROM sqlite_schema
+		WHERE type = 'table'
+		  AND name IN ('memory_exchanges', 'memory_messages', 'memory_queue', 'logs')
+	`).get() as { count: number | bigint };
+	return Number(row.count) > 0;
 }
 
 function validateNewExchange(input: NewMemoryExchange): NewMemoryExchange {

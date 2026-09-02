@@ -40,7 +40,37 @@ The analyzer ranks files by its AST-based quality heuristic, hard-limit violatio
 
 Prompt Polish model configuration is stored under the Pi agent directory at `pi-toolbox/config.json`. Workflow content is not persisted.
 
-Memory groups each user interaction and its completed agent responses into one conversation exchange, then extracts durable facts after Pi is fully settled. Project knowledge is stored under `projects/<project>/`; reusable coding, documentation, personal, and team knowledge stays in global collections. Exchanges, the fact queue, errors, and the global enabled setting are stored in `pi-toolbox/memory.sqlite`. The enabled setting survives operational schema resets. When Memory is disabled, Pi reads this setting through a short-lived worker and does not start capture, extraction, repository, or curator infrastructure. Failed curation retries per working directory without blocking other projects. Successful curation changes use a validated, curator-authored `memory(<scope>): summary` or `memory: summary` Git commit message. Errors remain hidden from the Pi UI. SQLite, Git, and knowledge-base filesystem work run in a dedicated worker so they cannot block Pi's TUI event loop. If `~/work-memory` is missing, Memory initializes the Git repository and collection indices automatically.
+## Memory service
+
+Memory groups each user interaction and its completed agent responses into one exchange. A local socket server stores conversation events in `pi-toolbox/memory.sqlite`. One extraction process converts settled exchanges into facts, and one curation process applies fact batches to `~/work-memory`.
+
+A Pi session connects during `session_start`. The first client starts the detached service; later sessions connect to the same `memory.sock`. `session_shutdown` settles that session's open exchange and closes its client connection. The service handles `SIGTERM` by stopping both consumers and removing the socket. It otherwise remains available for later Pi sessions.
+
+`/tb-memory off` stops both consumers. Clients remain connected so `/tb-memory on` works from any session. Capture requests received while disabled do not create exchanges or messages. Re-enabling Memory starts both consumers, which inspect SQLite before waiting for queue wakes.
+
+Before the first client-server startup, close every Pi session running an older pi-toolbox version. Startup refuses to continue while `memory.sqlite.lock` exists. The schema migration creates `memory.sqlite.pre-client-server.bak`, preserves exchange and fact rows, settles orphaned open exchanges, and adds request receipts and open-session uniqueness.
+
+The default service files are:
+
+```text
+~/.pi/agent/pi-toolbox/
+├── memory.sqlite
+├── memory.sqlite.pre-client-server.bak
+├── memory.sock
+├── memory.start.lock
+└── memory-service.log
+```
+
+Inspect the durable queues with:
+
+```sh
+sqlite3 ~/.pi/agent/pi-toolbox/memory.sqlite \
+  "SELECT COUNT(*) FROM memory_exchanges WHERE settled_at IS NOT NULL AND extracted_at IS NULL;"
+sqlite3 ~/.pi/agent/pi-toolbox/memory.sqlite \
+  "SELECT cwd, COUNT(*) FROM memory_queue WHERE processed_at IS NULL GROUP BY cwd ORDER BY MIN(id);"
+```
+
+Project knowledge is stored under `projects/<project>/`; reusable coding, documentation, personal, and team knowledge stays in global collections. Failed curation retries per working directory without blocking other projects. Successful changes use a validated `memory(<scope>): summary` or `memory: summary` Git commit message. If `~/work-memory` is missing, the service initializes its Git repository and collection indices.
 
 ## Development
 

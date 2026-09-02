@@ -1,7 +1,8 @@
-import { chmodSync, mkdirSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, rmSync } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { dirname } from "node:path";
 import type { PiInvocation } from "../../pi/invocation.ts";
+import { createLegacyMemoryWorkerLockPath } from "../config.ts";
 import { MemoryFrameDecoder, encodeMemoryFrame } from "../protocol/framing.ts";
 import {
 	MEMORY_PROTOCOL_VERSION,
@@ -55,6 +56,10 @@ export class MemoryServer {
 		private readonly config: MemoryServerConfig,
 		consumers?: MemoryConsumerSupervisor,
 	) {
+		const legacyWorkerLockPath = createLegacyMemoryWorkerLockPath(config.databasePath);
+		if (existsSync(legacyWorkerLockPath)) {
+			throw new Error(`Close Pi sessions using the old Memory extension and remove its lock before starting Memory: ${legacyWorkerLockPath}`);
+		}
 		this.disconnectedSessionGraceMs = config.disconnectedSessionGraceMs ?? DEFAULT_DISCONNECTED_SESSION_GRACE_MS;
 		if (!Number.isInteger(this.disconnectedSessionGraceMs) || this.disconnectedSessionGraceMs < 0) {
 			throw new Error("Memory disconnected-session grace period is invalid");

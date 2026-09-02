@@ -1,4 +1,4 @@
-import { chmodSync, closeSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, closeSync, existsSync, mkdirSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { connect, type Socket } from "node:net";
 import { spawn } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -18,6 +18,7 @@ export async function connectToMemoryService(
 	chmodSync(config.dataDirectory, 0o700);
 	const connected = await tryConnect(paths.socketPath);
 	if (connected) return connected;
+	assertNoLegacyWorker(paths.legacyWorkerLockPath);
 
 	const deadline = Date.now() + SERVER_READY_TIMEOUT_MS;
 	while (Date.now() < deadline) {
@@ -78,6 +79,12 @@ function launchDetachedServer(
 		child.unref();
 	} finally {
 		closeSync(log);
+	}
+}
+
+function assertNoLegacyWorker(path: string): void {
+	if (existsSync(path)) {
+		throw new Error(`Close Pi sessions using the old Memory extension and remove its lock before starting Memory: ${path}`);
 	}
 }
 

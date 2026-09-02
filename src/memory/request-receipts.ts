@@ -1,6 +1,6 @@
 import type Database from "better-sqlite3";
 
-const REQUEST_RECEIPT_SCHEMA = `
+export const REQUEST_RECEIPT_SCHEMA = `
 CREATE TABLE IF NOT EXISTS memory_request_receipts (
     request_id TEXT PRIMARY KEY,
     pi_session_id TEXT NOT NULL,

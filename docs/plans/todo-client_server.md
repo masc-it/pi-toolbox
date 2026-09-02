@@ -1,6 +1,6 @@
 # Memory client-server redesign plan
 
-Status: `todo`
+Status: `done`
 
 ## Goal
 
@@ -340,18 +340,18 @@ QA checkpoint:
 
 ## Phase 4: Cutover and removal of session workers
 
-- [todo] Add the schema migration for open-session uniqueness and request receipts without replacing existing exchange or fact rows.
-- [todo] Back up `memory.sqlite` before migration.
-- [todo] Require no old Memory lock before cutover.
-- [todo] Replace `registerMemory` worker construction with one socket client per Pi session.
-- [todo] Remove the per-session Memory workers, settings workers, and repository lock.
-- [todo] Document service startup, shutdown, disabled behavior, and queue inspection.
-- [todo] Require Pi sessions running the old extension to close during cutover.
+- [done] Add the schema migration for open-session uniqueness and request receipts without replacing existing exchange or fact rows.
+- [done] Back up `memory.sqlite` before migration.
+- [done] Require no old Memory lock before cutover.
+- [done] Replace `registerMemory` worker construction with one socket client per Pi session.
+- [done] Remove the per-session Memory workers, settings workers, and repository lock.
+- [done] Document service startup, shutdown, disabled behavior, and queue inspection.
+- [done] Require Pi sessions running the old extension to close during cutover.
 
 QA checkpoint:
 
-- [todo] Migrate a copy of the current database and preserve pending and processed counts.
-- [todo] Start Pi sessions from different working directories and confirm they use the same service.
-- [todo] Disable Memory from one session and confirm all clients stop capture and both consumers stop.
-- [todo] Re-enable it from another session and confirm both queues drain.
-- [todo] Run the TypeScript typecheck and the protocol, producer, extraction-consumer, and curation-consumer test suites.
+- [done] Migrate a copy of the current database and preserve pending and processed counts.
+- [done] Start Pi sessions from different working directories and confirm they use the same service.
+- [done] Disable Memory from one session and confirm all clients stop capture and both consumers stop.
+- [done] Re-enable it from another session and confirm both queues drain.
+- [done] Run the TypeScript typecheck and the protocol, producer, extraction-consumer, and curation-consumer test suites.
