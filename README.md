@@ -29,7 +29,7 @@ Write a prompt in Pi's editor and open Prompt Polish. When the prompt is populat
 
 ## Context Finder
 
-Context Finder sends an editable copy of the current Pi prompt to `openai-codex/gpt-5.6-luna` at medium thinking and starts automatically when the prompt is populated. A read-only scouting agent uses project search tools such as read, grep, find, ls, `rg`, and `git grep`, then appends its bullet list of relevant files and symbols and automatically submits the enriched prompt to Pi.
+Context Finder sends an editable copy of the current Pi prompt to `openai-codex/gpt-6-luna` at medium thinking and starts automatically when the prompt is populated. A read-only scouting agent uses project search tools such as read, grep, find, ls, `rg`, and `git grep`, then appends its bullet list of relevant files and symbols and automatically submits the enriched prompt to Pi.
 
 ## Python Complexity
 

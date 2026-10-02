@@ -1,7 +1,7 @@
 import { getPiInvocation } from "../pi/invocation.ts";
 import { runHeadlessAgent, type HeadlessAgentProgress } from "../pi/headless-agent.ts";
 
-export const CONTEXT_FINDER_MODEL = "openai-codex/gpt-5.6-luna";
+export const CONTEXT_FINDER_MODEL = "openai-codex/gpt-6-luna";
 export const CONTEXT_FINDER_THINKING_LEVEL = "medium";
 
 const CONTEXT_FINDER_TOOLS = "read,grep,find,ls,bash";
