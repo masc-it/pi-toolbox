@@ -10,7 +10,7 @@ import type { ExtractableMemoryExchange, MemoryExchangeMessage } from "./queue.t
 
 export const MEMORY_EXTRACTOR_PROFILE: WorkflowModelProfile = {
 	provider: "openai-codex",
-	model: "gpt-5.6-luna",
+	model: "gpt-6-luna",
 	thinkingLevel: "off",
 };
 

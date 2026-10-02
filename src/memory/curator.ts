@@ -4,7 +4,7 @@ import { runHeadlessAgent } from "../pi/headless-agent.ts";
 import { validateMemoryCommitMessage } from "./commit-message.ts";
 import type { MemoryQueueRow } from "./queue.ts";
 
-export const MEMORY_CURATOR_MODEL = "openai-codex/gpt-5.6-luna";
+export const MEMORY_CURATOR_MODEL = "openai-codex/gpt-6-luna";
 export const MEMORY_CURATOR_THINKING_LEVEL = "medium";
 
 const CURATOR_TOOLS = "read,write,edit,grep,find,ls";

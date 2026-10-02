@@ -59,7 +59,9 @@ The first version does not parse Vue or Svelte component files, Flow syntax, emb
 
 ## Data
 
-Prompt Polish model configuration is stored under the Pi agent directory at `pi-toolbox/config.json`. Workflow content is not persisted.
+All model workflows use `openai-codex/gpt-6-luna` by default: Prompt Polish at high thinking, Context Finder and Memory curation at medium, and Memory extraction at off.
+
+Prompt Polish model configuration is stored under the Pi agent directory at `pi-toolbox/config.json`. An explicit profile overrides the default; update any existing `gpt-5.6-luna` profile to use Luna 6. Workflow content is not persisted.
 
 ## Memory service
 
