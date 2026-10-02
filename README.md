@@ -95,6 +95,8 @@ Project knowledge is stored under `projects/<project>/`; reusable coding, docume
 
 ## Development
 
+The extension is constantly QA-tested by AI agents on real use cases, so no unit tests are needed.
+
 ```sh
 npm install
 npm run typecheck

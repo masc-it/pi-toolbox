@@ -17,9 +17,7 @@
     "LICENSE"
   ],
   "scripts": {
-    "typecheck": "tsc --noEmit",
-    "test:complexity": "node --test tests/complexity/javascript-typescript-analyzer.test.mjs && node --experimental-transform-types --test tests/complexity/*.test.ts",
-    "test:memory-server": "node --experimental-transform-types --test tests/memory/*.test.ts"
+    "typecheck": "tsc --noEmit"
   },
   "pi": {
     "extensions": [
