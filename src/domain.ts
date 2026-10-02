@@ -27,5 +27,5 @@ export const THINKING_LEVELS: readonly ModelThinkingLevel[] = [
 export const DEFAULT_PROMPT_POLISH_PROFILE: WorkflowModelProfile = {
 	provider: "openai-codex",
 	model: "gpt-6-luna",
-	thinkingLevel: "high",
+	thinkingLevel: "low",
 };

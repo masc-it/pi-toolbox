@@ -1,47 +1,131 @@
 # pi-toolbox
 
-Minimal, keyboard-first workflow tools for the Pi coding agent.
+Pi Toolbox adds prompt tools, code analysis, and conversation Memory to the Pi coding agent.
 
-Pi Toolbox provides a shared keyboard-driven overlay with Prompt Polish, Context Finder, Python Complexity, and JS/TS Complexity.
+## Install
 
-## Install from a checkout
+1. Run this command:
 
-```sh
-pi install /absolute/path/to/pi-toolbox
-```
+   ```sh
+   pi install /absolute/path/to/pi-toolbox
+   ```
 
-Restart Pi after installation.
+2. Restart Pi.
 
-## Entry points
+## Commands and keys
 
-- `Ctrl+Shift+Enter` or `/toolbox`: open the Toolbox landing screen.
-- `Ctrl+Enter` or `/tb-polish`: open Prompt Polish directly.
-- `Ctrl+.` or `/tb-context`: open Context Finder directly.
-- `/tb-complexity`: analyze Python code complexity directly.
-- `/tb-js-complexity`: analyze JavaScript and TypeScript code complexity directly.
-- `/tb-memory [on|off|toggle]`: control Memory globally. Omitting the argument toggles it. The current state and pending, processed, and error counts appear at the bottom of the Toolbox panel.
+Use interactive Pi mode for task screens.
+Use slash commands if your terminal cannot send the key combinations.
 
-Slash commands support terminals that do not emit distinct modified key sequences.
+| Command | Key combination | Function |
+| --- | --- | --- |
+| `/toolbox` | `Ctrl+Shift+Enter` | Open the Toolbox screen. The key combination also closes an open screen. |
+| `/tb-polish` | `Ctrl+Enter` | Open Prompt Polish. |
+| `/tb-context` | `Ctrl+.` | Open Context Finder. |
+| `/tb-complexity` | None | Analyze Python code complexity. |
+| `/tb-js-complexity` | None | Analyze JavaScript and TypeScript code complexity. |
+| `/tb-memory [on\|off\|toggle]` | None | Set the Memory state for all sessions. No argument changes the state to its opposite. |
+
+The Toolbox screen shows the Memory state and the counts for pending work, processed facts, and errors.
 
 ## Prompt Polish
 
-Write a prompt in Pi's editor and open Prompt Polish. When the prompt is populated, polishing starts automatically. The full-screen workspace provides an editable source textarea above an editable polished-prompt textarea. Regenerate from the current source when needed, then accept the result into Pi's editor or copy it while continuing to edit. The only screen actions are vertically stacked in this order: Accept (`Ctrl+S`), Copy (`Ctrl+C`), and Polish (`Ctrl+Enter`). Accepting automatically submits the polished prompt to Pi; if submission fails, the prompt remains in the editor.
+Prompt Polish improves a prompt.
+You can edit the source prompt and the result.
+
+1. Enter a prompt in the Pi editor.
+2. Open Prompt Polish.
+
+Prompt Polish starts automatically if the source prompt contains text.
+The screen has these actions, in this order:
+
+| Action | Key combination | Function |
+| --- | --- | --- |
+| Accept | `Ctrl+S` | Send the result to Pi. |
+| Copy | `Ctrl+C` | Copy the result without closing the screen. |
+| Polish | `Ctrl+Enter` | Generate a new result from the source prompt. |
+
+If Accept cannot send the result, the result stays in the Pi editor.
+Use `Esc` to cancel an active model request.
 
 ## Context Finder
 
-Context Finder sends an editable copy of the current Pi prompt to `openai-codex/gpt-6-luna` at medium thinking and starts automatically when the prompt is populated. A read-only scouting agent uses project search tools such as read, grep, find, ls, `rg`, and `git grep`, then appends its bullet list of relevant files and symbols and automatically submits the enriched prompt to Pi.
+Context Finder searches the project for files and symbols related to your prompt.
+It uses `read`, `grep`, `find`, `ls`, and `bash`.
+The model instructions permit only read operations, such as `rg` and `git grep`.
+These instructions do not provide a filesystem sandbox.
 
-## Python Complexity
+1. Enter a prompt in the Pi editor.
+2. Open Context Finder.
 
-Python Complexity runs the bundled `scripts/python_complexity.py` analyzer through `uv`, so `uv` must be available in `PATH`. It scans tracked and untracked production Python files, respects Git ignore rules, and falls back to a recursive walk outside Git repositories. It excludes `test` and `tests` directories; `test_*.py`, `*_test.py`, and `conftest.py`; virtual environments; Python and lint caches; dependencies; coverage output; and `build` and `dist` output.
+You can edit the prompt copy in this screen.
+The search starts automatically if the prompt contains text.
+Context Finder adds file and symbol references, then sends the complete prompt to Pi.
+If submission fails, the complete prompt returns to the Pi editor.
+Use `Esc` to cancel an active search.
 
-The analyzer ranks files by its AST-based quality heuristic, hard-limit violations, function complexity, nesting, module logical lines, and path. It reports one file with module metrics, top-level executable statements, the biggest function offender, source spans, and up to four additional hotspots. Function metrics cover cyclomatic complexity, nesting, logical lines, parameters, local variables, branches, and bare `except` clauses. The heuristic ranks refactoring candidates; it does not measure correctness or runtime performance. Toolbox submits a fixed refactoring request with the report to the main Pi session.
+## Code complexity [WIP]
 
-## JS/TS Complexity
+The analyzers examine production source files, excluding tests, dependencies, and generated output.
+They include tracked and untracked files.
+They obey Git ignore rules.
+Outside a Git repository, they search directories recursively.
 
-JS/TS Complexity runs the bundled `scripts/javascript_typescript_complexity.mjs` analyzer with Toolbox's Node executable and pinned TypeScript parser. It accepts `.js`, `.jsx`, `.ts`, `.tsx`, `.mjs`, `.cjs`, `.mts`, and `.cts` files. Parsing is syntax-only: the analyzer does not load the target project's dependencies, `tsconfig.json`, source modules, or build scripts.
+Each report identifies one file, its main problem area, source line ranges, and up to four other problem areas.
+Toolbox sends the report to Pi with a fixed request for code changes.
+The analyzers do not change or execute project code.
 
-Discovery includes tracked and untracked production files, respects Git ignore rules, and uses the same recursive fallback as the Python analyzer. It excludes declaration files, test files and directories, generated and dependency directories, minified files, and bundles. A repository can add exact-file or directory-prefix exclusions in `.pi-toolbox.json`:
+The quality score ranks files for review.
+It does not measure correctness or execution speed.
+
+Use `Enter` or `Esc` to cancel analysis.
+Failure or cancellation leaves the screen open with Retry and Close.
+
+### Python
+
+Python Complexity runs `scripts/python_complexity.py` through `uv`.
+Make sure that `uv` is available in `PATH`.
+
+The analyzer excludes these files and directories:
+
+- `test` and `tests` directories.
+- `test_*.py`, `*_test.py`, and `conftest.py` files.
+- Virtual environments and dependencies.
+- Python caches, lint caches, and coverage output.
+- `build` and `dist` output.
+
+The Python abstract syntax tree (AST) supplies these file ranking values, in order:
+
+1. Quality score.
+2. Count of hard-limit violations.
+3. Function complexity.
+4. Nesting depth.
+5. Module logical lines.
+6. File path.
+
+The report includes module measurements and executable statements at module level.
+Function measurements include:
+
+- Cyclomatic complexity.
+- Nesting depth.
+- Logical lines.
+- Parameters and local variables.
+- Branches and bare `except` clauses.
+
+### JavaScript and TypeScript
+
+JS/TS Complexity runs `scripts/javascript_typescript_complexity.mjs` with the Toolbox Node executable and a fixed TypeScript parser version.
+
+The analyzer accepts these file types:
+
+```text
+.js .jsx .ts .tsx .mjs .cjs .mts .cts
+```
+
+The parser checks syntax without loading project dependencies, `tsconfig.json`, source modules, or build scripts.
+
+The analyzer excludes declaration files, tests, generated directories, dependency directories, minified files, and bundles.
+You can exclude more paths through `.pi-toolbox.json`:
 
 ```json
 {
@@ -53,56 +137,155 @@ Discovery includes tracked and untracked production files, respects Git ignore r
 }
 ```
 
-The analyzer measures module bodies, class static blocks, and callables. Its metrics cover cyclomatic complexity, control-flow nesting, logical lines, parameters, local bindings, module size, and top-level imperative statements. It reports the highest-ranked file, its primary executable scope, and up to four additional hotspots. The heuristic ranks refactoring candidates; it does not detect runtime performance problems such as blocking I/O, sequential independent awaits, N+1 requests, quadratic work, or unbounded concurrency.
+Each entry excludes an exact file path or a directory and its contents.
 
-The first version does not parse Vue or Svelte component files, Flow syntax, embedded templates, or syntax supplied only by a project compiler plugin. Analysis is limited to five minutes, 50,000 source files, 10 MiB per file, and 512 MiB across source files. Toolbox submits the report with a fixed request to preserve behavior and public types rather than optimize only for the score.
+The analyzer measures module bodies, class static blocks, and executable functions.
+Measurements include:
 
-## Data
+- Cyclomatic complexity.
+- Control-flow nesting depth.
+- Logical lines.
+- Parameters and local bindings.
+- Module size.
+- Executable statements at module level.
 
-All model workflows use `openai-codex/gpt-6-luna` by default: Prompt Polish at high thinking, Context Finder and Memory curation at medium, and Memory extraction at off.
+The analyzer does not detect execution problems such as blocking I/O, repeated requests, or unrestricted concurrency.
+It does not parse Vue or Svelte components, Flow syntax, embedded templates, or syntax from compiler plugins.
 
-Prompt Polish model configuration is stored under the Pi agent directory at `pi-toolbox/config.json`. An explicit profile overrides the default; update any existing `gpt-5.6-luna` profile to use Luna 6. Workflow content is not persisted.
+Analysis has these limits:
 
-## Memory service
+| Item | Limit |
+| --- | --- |
+| Analysis time | 5 minutes |
+| Source files | 50,000 |
+| Size of one source file | 10 MiB |
+| Total size of source files | 512 MiB |
 
-Memory groups each user interaction and its completed agent responses into one exchange. A local socket server stores conversation events in `pi-toolbox/memory.sqlite`. One extraction process converts settled exchanges into facts, and one curation process applies fact batches to `~/work-memory`.
+The request to Pi specifies these constraints:
 
-A Pi session connects during `session_start`. The first client starts the detached service; later sessions connect to the same `memory.sock`. `session_shutdown` settles that session's open exchange and closes its client connection. The service handles `SIGTERM` by stopping both consumers and removing the socket. It otherwise remains available for later Pi sessions.
+- Preserve behavior and public types.
+- Use the reported problem areas to select changes.
+- Do not change code only to improve the score.
 
-`/tb-memory off` stops both consumers. Clients remain connected so `/tb-memory on` works from any session. Capture requests received while disabled do not create exchanges or messages. Re-enabling Memory starts both consumers, which inspect SQLite before waiting for queue wakes.
+## Models and configuration
 
-Before the first client-server startup, close every Pi session running an older pi-toolbox version. Startup refuses to continue while `memory.sqlite.lock` exists. The schema migration creates `memory.sqlite.pre-client-server.bak`, preserves exchange and fact rows, settles orphaned open exchanges, and adds request receipts and open-session uniqueness.
+All model tasks use `openai-codex/gpt-6-luna` by default.
+Thinking levels:
 
-The default service files are:
+| Task | Thinking level |
+| --- | --- |
+| Prompt Polish | `low` |
+| Context Finder | `medium` |
+| Memory extraction | `off` |
+| Memory curation | `medium` |
+
+Prompt Polish reads its model profile from `pi-toolbox/config.json` under the Pi agent directory.
+A profile in this file replaces the default profile.
+To use the default, set `models.prompt_polish` to `null` or remove that field.
+To keep a custom profile, change its model to `gpt-6-luna` as necessary.
+
+Toolbox does not save task editor content or analysis reports.
+Memory can save a prompt after Toolbox sends it to Pi.
+
+## Memory [WIP]
+
+Memory groups user messages and completed agent responses into an exchange.
+The exchange closes when the Pi interaction finishes.
+The service saves exchanges in `pi-toolbox/memory.sqlite` under the Pi agent directory.
+
+Two background processes handle saved work:
+
+1. Extraction converts completed exchanges into facts.
+2. Curation uses batches of facts to update the knowledge repository at `~/work-memory`.
+
+### Start and stop
+
+A Pi session connects to Memory at `session_start`.
+The first client starts the background service.
+Other sessions use the same `memory.sock` socket.
+
+At `session_shutdown`, Memory completes the open exchange and closes the client connection.
+The service stays available for other sessions.
+A `SIGTERM` signal stops both background processes and removes the socket.
+
+### Enable or disable
+
+Use `/tb-memory off` to disable Memory for all sessions.
+This stops both background processes.
+Clients stay connected.
+Memory does not save new exchanges or messages while disabled.
+
+Use `/tb-memory on` to enable Memory from any session.
+Both processes check SQLite for pending work.
+
+### Upgrade from the old Memory service
+
+1. Close all Pi sessions that use the old pi-toolbox version.
+2. Start a Pi session with the new version.
+
+The service cannot start while `memory.sqlite.lock` exists.
+
+The database upgrade makes these changes:
+
+- Creates `memory.sqlite.pre-client-server.bak`.
+- Keeps existing exchanges and facts.
+- Completes open exchanges from old sessions.
+- Adds request receipts to prevent duplicate changes from repeated request IDs.
+- Limits each session to one open exchange.
+
+### Files and pending work
+
+Default files under `~/.pi/agent/pi-toolbox/`:
 
 ```text
-~/.pi/agent/pi-toolbox/
-├── memory.sqlite
-├── memory.sqlite.pre-client-server.bak
-├── memory.sock
-├── memory.start.lock
-└── memory-service.log
+memory.sqlite
+memory.sqlite.pre-client-server.bak
+memory.sock
+memory.start.lock
+memory-service.log
 ```
 
-Inspect the durable queues with:
+To count exchanges that need extraction, run this command:
 
 ```sh
 sqlite3 ~/.pi/agent/pi-toolbox/memory.sqlite \
   "SELECT COUNT(*) FROM memory_exchanges WHERE settled_at IS NOT NULL AND extracted_at IS NULL;"
+```
+
+To count pending facts by working directory, run this command:
+
+```sh
 sqlite3 ~/.pi/agent/pi-toolbox/memory.sqlite \
   "SELECT cwd, COUNT(*) FROM memory_queue WHERE processed_at IS NULL GROUP BY cwd ORDER BY MIN(id);"
 ```
 
-Project knowledge is stored under `projects/<project>/`; reusable coding, documentation, personal, and team knowledge stays in global collections. Failed curation retries per working directory without blocking other projects. Successful changes use a validated `memory(<scope>): summary` or `memory: summary` Git commit message. If `~/work-memory` is missing, the service initializes its Git repository and collection indices.
+### Knowledge repository
+
+Memory saves project knowledge under `projects/<project>/`.
+It saves shared knowledge in global collections for coding, documentation, personal principles, and team practices.
+If `~/work-memory` does not exist, Memory creates the Git repository and collection index files.
+
+Curation saves valid changes with a Git commit.
+Commit messages use `memory(<scope>): summary` or `memory: summary`.
+Curation retries failures for each working directory separately.
+Other projects can continue during a retry delay.
 
 ## Development
 
-The extension is constantly QA-tested by AI agents on real use cases, so no unit tests are needed.
+The project uses AI agents for quality assurance (QA) on real use cases.
+The repository has no unit test suite.
 
-```sh
-npm install
-npm run typecheck
-```
+1. Install dependencies:
+
+   ```sh
+   npm install
+   ```
+
+2. Check TypeScript types:
+
+   ```sh
+   npm run typecheck
+   ```
 
 ## License
 
