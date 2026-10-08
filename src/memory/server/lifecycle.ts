@@ -28,8 +28,8 @@ export async function connectToMemoryService(
 				const racedConnection = await tryConnect(paths.socketPath);
 				if (racedConnection) return racedConnection;
 				rmSync(paths.socketPath, { force: true });
-				launchDetachedServer(config, piInvocation, paths.socketPath, paths.logPath);
-				return await waitForSocket(paths.socketPath, deadline);
+				const server = launchDetachedServer(config, piInvocation, paths.socketPath, paths.logPath);
+				return await waitForSocket(paths.socketPath, deadline, server, paths.logPath);
 			} finally {
 				closeSync(lock);
 				rmSync(paths.startupLockPath, { force: true });
@@ -44,10 +44,24 @@ export async function connectToMemoryService(
 	throw new Error(`Memory server did not become ready within ${SERVER_READY_TIMEOUT_MS}ms`);
 }
 
-async function waitForSocket(socketPath: string, deadline: number): Promise<Socket> {
+interface LaunchedServer {
+	/** Describes why the server process ended, or null while it is still running. */
+	exitReason(): string | null;
+}
+
+async function waitForSocket(
+	socketPath: string,
+	deadline: number,
+	server: LaunchedServer,
+	logPath: string,
+): Promise<Socket> {
 	while (Date.now() < deadline) {
 		const socket = await tryConnect(socketPath);
 		if (socket) return socket;
+		const exitReason = server.exitReason();
+		if (exitReason !== null) {
+			throw new Error(`Memory server exited during startup (${exitReason}); see ${logPath}`);
+		}
 		await delay(SOCKET_RETRY_DELAY_MS);
 	}
 	throw new Error(`Memory server did not become ready within ${SERVER_READY_TIMEOUT_MS}ms`);
@@ -58,7 +72,7 @@ function launchDetachedServer(
 	piInvocation: PiInvocation,
 	socketPath: string,
 	logPath: string,
-): void {
+): LaunchedServer {
 	const entryPath = fileURLToPath(new URL("./entry.mjs", import.meta.url));
 	const log = openSync(logPath, "a", 0o600);
 	try {
@@ -75,8 +89,15 @@ function launchDetachedServer(
 				}),
 			},
 		});
-		child.once("error", () => undefined);
+		let exitReason: string | null = null;
+		child.once("error", (error) => {
+			exitReason ??= `spawn failed: ${error.message}`;
+		});
+		child.once("exit", (code, signal) => {
+			exitReason ??= signal ? `signal ${signal}` : `exit code ${code}`;
+		});
 		child.unref();
+		return { exitReason: () => exitReason };
 	} finally {
 		closeSync(log);
 	}

@@ -1,4 +1,4 @@
-import type { AgentEndEvent, ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import { getAgentDir, type AgentEndEvent, type ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { MemorySessionClient } from "./client/capture.ts";
 import { MemoryServerConnection } from "./client/connection.ts";
 import { createMemoryConfig, MEMORY_CLIENT_VERSION } from "./config.ts";
@@ -128,7 +128,7 @@ export interface MemoryControl {
 }
 
 export function registerMemory(pi: ExtensionAPI): MemoryControl {
-	const config = createMemoryConfig();
+	const config = createMemoryConfig(getAgentDir());
 	const runtime = new MemoryClientRuntime(async (identity) => {
 		const connection = await MemoryServerConnection.connect(config, {
 			clientVersion: MEMORY_CLIENT_VERSION,
@@ -144,12 +144,11 @@ export function registerMemory(pi: ExtensionAPI): MemoryControl {
 		}
 	});
 
-	pi.on("session_start", async (_event, ctx) => {
-		try {
-			await runtime.start({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd });
-		} catch {
-			// Memory startup must not interrupt the Pi session.
-		}
+	pi.on("session_start", (_event, ctx) => {
+		// Not awaited: Pi waits for session_start handlers before rendering startup,
+		// and a slow or failing memory server must not delay or interrupt the session.
+		// Later captures join the same in-flight connection.
+		runtime.start({ sessionId: ctx.sessionManager.getSessionId(), cwd: ctx.cwd }).catch(() => undefined);
 	});
 
 	pi.on("message_end", async (event) => {

@@ -1,6 +1,8 @@
 import { homedir } from "node:os";
 import { join } from "node:path";
-import { getAgentDir } from "@earendil-works/pi-coding-agent";
+
+// The memory server runs as a plain Node process without Pi's peer packages,
+// so this module must not import @earendil-works/* at runtime.
 
 export const MEMORY_GLOBAL_COLLECTIONS = ["coding", "docs-style", "personal-principles", "team"] as const;
 export type MemoryGlobalCollection = (typeof MEMORY_GLOBAL_COLLECTIONS)[number];
@@ -51,7 +53,7 @@ export function createLegacyMemoryWorkerLockPath(databasePath: string): string {
 }
 
 export function createMemoryConfig(
-	agentDirectory = getAgentDir(),
+	agentDirectory: string,
 	homeDirectory = homedir(),
 ): MemoryConfig {
 	const dataDirectory = join(agentDirectory, "pi-toolbox");
